@@ -1,0 +1,19 @@
+{
+  "name": "pengu-aram-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && node .build/build.mjs",
+    "test": "tsx --test .build/tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/jsdom": "21.1.7",
+    "@types/node": "22.15.0",
+    "esbuild": "0.25.0",
+    "jsdom": "26.1.0",
+    "tsx": "4.21.0",
+    "typescript": "5.8.3"
+  }
+}

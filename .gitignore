@@ -1,0 +1,6 @@
+node_modules/
+.build/*
+!.build/build.mjs
+!.build/tests/
+.build/tests/*
+!.build/tests/*.test.ts
