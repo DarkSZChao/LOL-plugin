@@ -34,7 +34,8 @@ export function controlPanel({ injector, scope }: FeatureContext): void {
     + '</fieldset><fieldset><legend>对局结束</legend>'
     + '<div class="row">' + checkbox('autoHonor')
     + '<label class="parameter">点赞类型<select name="honorCategory"><option value="RANDOM">随机</option><option value="HEART">友善</option><option value="COOL">冷静</option><option value="SHOTCALLER">指挥</option></select></label></div>'
-    + '<div class="row">' + checkbox('autoOpenStats') + '</div>'
+    + '<div class="row">' + checkbox('autoOpenStats')
+    + '<label class="parameter">统计延迟<input aria-label="统计延迟（毫秒）" title="点赞处理结束后等待，单位：毫秒" name="openStatsDelayMs" type="number" min="0" max="15000" step="1" required></label></div>'
     + '<div class="row">' + checkbox('autoReturnLobby')
     + '<label class="parameter">回房延迟<input aria-label="结算出现后的回房延迟（毫秒）" title="从结算或点赞界面出现时计时，15000 毫秒 = 15 秒" name="returnLobbyDelayMs" type="number" min="0" max="30000" step="1" required></label></div>'
     + '</fieldset><fieldset><legend>大乱斗选人</legend>'
@@ -54,7 +55,7 @@ export function controlPanel({ injector, scope }: FeatureContext): void {
 
   function sync(): void {
     for (const [key] of switches) shadow.querySelector<HTMLInputElement>('[name="' + key + '"]')!.checked = config[key];
-    for (const key of ['autoAcceptDelayMs', 'returnLobbyDelayMs'] as const) {
+    for (const key of ['autoAcceptDelayMs', 'openStatsDelayMs', 'returnLobbyDelayMs'] as const) {
       shadow.querySelector<HTMLInputElement>('[name="' + key + '"]')!.value = String(config[key]);
     }
     shadow.querySelector<HTMLSelectElement>('[name="honorCategory"]')!.value = config.honorCategory;
@@ -75,11 +76,11 @@ export function controlPanel({ injector, scope }: FeatureContext): void {
     const flag = switches.find(([key]) => key === target.name);
     if (flag) {
       saved(updateConfig({ [flag[0]]: (target as HTMLInputElement).checked }));
-    } else if (target.name === 'autoAcceptDelayMs' || target.name === 'returnLobbyDelayMs') {
+    } else if (target.name === 'autoAcceptDelayMs' || target.name === 'openStatsDelayMs' || target.name === 'returnLobbyDelayMs') {
       const input = target as HTMLInputElement;
       const number = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(number) || !Number.isInteger(number) || !input.validity.valid) {
-        status.textContent = '请输入范围内的整数：接受 0–15000，回房 0–30000 毫秒。';
+        status.textContent = '请输入范围内的整数：接受及统计 0–15000，回房 0–30000 毫秒。';
         sync();
         return;
       }

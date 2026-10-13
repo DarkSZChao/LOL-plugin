@@ -13,6 +13,7 @@ export interface Config {
   friendStatus: boolean;
   quickLobby: boolean;
   autoAcceptDelayMs: number;
+  openStatsDelayMs: number;
   returnLobbyDelayMs: number;
   aramQueueId: 2400;
   spells: { spell1Id: number; spell2Id: number };
@@ -42,6 +43,7 @@ const defaults: Config = {
   friendStatus: true,
   quickLobby: true,
   autoAcceptDelayMs: 250,
+  openStatsDelayMs: 500,
   returnLobbyDelayMs: 2000,
   aramQueueId: 2400,
   // 左侧技能 / 右侧技能：固定闪现 / 雪球。
@@ -62,7 +64,7 @@ export function normalizeConfig(value: unknown, base: Config = defaults): Config
   for (const [key] of switches) {
     if (typeof raw[key] === 'boolean') result[key] = raw[key] as boolean;
   }
-  for (const [key, max] of [['autoAcceptDelayMs', 15000], ['returnLobbyDelayMs', 30000]] as const) {
+  for (const [key, max] of [['autoAcceptDelayMs', 15000], ['openStatsDelayMs', 15000], ['returnLobbyDelayMs', 30000]] as const) {
     const number = raw[key];
     if (typeof number === 'number' && Number.isFinite(number)) {
       result[key] = Math.min(max, Math.max(0, Math.round(number)));

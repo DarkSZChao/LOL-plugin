@@ -25,6 +25,7 @@ var defaults = {
   friendStatus: true,
   quickLobby: true,
   autoAcceptDelayMs: 250,
+  openStatsDelayMs: 500,
   returnLobbyDelayMs: 2e3,
   aramQueueId: 2400,
   // 左侧技能 / 右侧技能：固定闪现 / 雪球。
@@ -40,7 +41,7 @@ function normalizeConfig(value, base = defaults) {
   for (const [key] of switches) {
     if (typeof raw[key] === "boolean") result[key] = raw[key];
   }
-  for (const [key, max] of [["autoAcceptDelayMs", 15e3], ["returnLobbyDelayMs", 3e4]]) {
+  for (const [key, max] of [["autoAcceptDelayMs", 15e3], ["openStatsDelayMs", 15e3], ["returnLobbyDelayMs", 3e4]]) {
     const number = raw[key];
     if (typeof number === "number" && Number.isFinite(number)) {
       result[key] = Math.min(max, Math.max(0, Math.round(number)));
@@ -756,7 +757,6 @@ function champSelectQuit({ flow, injector, lcu, scope }) {
 // src/features/auto-open-stats.ts
 function autoOpenStats({ flow, injector, scope }, waitForHonor) {
   let nativeApi;
-  let nativeEpoch = -1;
   const rcp = window.rcp;
   if (rcp?.whenReady) {
     try {
@@ -773,7 +773,7 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
   }
   let statsEpoch = -1;
   let clickEpoch = -1;
-  let clicked = /* @__PURE__ */ new WeakSet();
+  let clicked = /* @__PURE__ */ new WeakMap();
   const visible = (element) => {
     if (!element?.isConnected) return false;
     for (let node = element; node; node = node.parentElement) {
@@ -789,11 +789,14 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
     if (statsEpoch === epoch) return Promise.resolve(true);
     if (clickEpoch !== epoch) {
       clickEpoch = epoch;
-      clicked = /* @__PURE__ */ new WeakSet();
+      clicked = /* @__PURE__ */ new WeakMap();
     }
     return new Promise((resolve) => {
       let done = false;
       let awaitingDetails = false;
+      let nativeAttempts = 0;
+      let detailsSeen = false;
+      let lastStage = "\u7B49\u5F85\u8FDB\u9636\u8BB0\u5F55\u5165\u53E3";
       let remove = () => {
       };
       let cancel = () => {
@@ -806,9 +809,15 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
         resolve(opened);
       };
       const click = (element) => {
-        if (!actionable(element) || clicked.has(element)) return false;
-        clicked.add(element);
-        element.click();
+        if (!actionable(element)) return false;
+        const previous = clicked.get(element);
+        if (previous && (previous.attempts >= 3 || Date.now() - previous.at < 1e3)) return false;
+        clicked.set(element, { attempts: (previous?.attempts ?? 0) + 1, at: Date.now() });
+        try {
+          element.ownerDocument.defaultView.HTMLElement.prototype.click.call(element);
+        } catch (error) {
+          report("\u70B9\u51FB\u7EDF\u8BA1\u5165\u53E3\uFF08\u7A0D\u540E\u91CD\u8BD5\uFF09", error);
+        }
         return true;
       };
       job.own(() => finish(false));
@@ -819,24 +828,48 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
         }
         const details = findVisible(document, ".match-details-root.match-details-no-header");
         if (details) {
+          detailsSeen = true;
+          lastStage = "\u7B49\u5F85\u5DF1\u65B9\u8EAB\u4EFD\u53CA\u56FE\u8868";
           const graph = findVisible(details, ".match-graph-container:not(.match-details-loading-hide) .match-graph-display");
           if (graph) {
             statsEpoch = epoch;
             finish(true);
             return;
           }
+          const standardTabs = findVisible(details, ".rcp-fe-lol-match-details-overlay-sub-nav");
+          if (standardTabs && !findVisible(details, ".team-avatar-wrapper.current")) return;
           const graphTab = findAction(details, '.rcp-fe-lol-match-details-overlay-sub-nav [data-name="graph"]') || [...details.querySelectorAll(".jade-match-details-tabs-nav")].map((nav) => nav.querySelectorAll(".jade-match-details-tab")[1]).find((tab) => actionable(tab ?? null));
           click(graphTab || null);
           return;
         }
-        if (nativeApi && nativeEpoch !== epoch && !awaitingDetails) {
-          nativeEpoch = epoch;
+        if (detailsSeen) {
+          statsEpoch = epoch;
+          finish(false);
+          return;
+        }
+        if (awaitingDetails) return;
+        const advanced = findAction(document, ".postgame-match-history-button") || [...document.querySelectorAll("lol-uikit-flat-button, button")].find((element) => actionable(element) && ["\u89C2\u770B\u8FDB\u9636\u8BB0\u5F55", "\u89C0\u770B\u9032\u968E\u7D00\u9304", "View Advanced Details"].includes(
+          element.textContent?.replace(/\s+/g, " ").trim() ?? ""
+        ));
+        if (advanced && (!nativeApi || nativeAttempts > 0 || !clicked.has(advanced)) && click(advanced)) {
+          lastStage = "\u5DF2\u70B9\u51FB\u8FDB\u9636\u8BB0\u5F55\uFF0C\u7B49\u5F85\u9875\u9762";
+          awaitingDetails = true;
+          job.later(() => {
+            if (done || !current()) return;
+            awaitingDetails = false;
+            injector.schedule();
+          }, 1e3);
+          return;
+        }
+        if (nativeApi && nativeAttempts < 3) {
+          nativeAttempts++;
+          lastStage = "\u5DF2\u8C03\u7528\u8FDB\u9636\u8BB0\u5F55\u6A21\u5757\uFF0C\u7B49\u5F85\u9875\u9762";
           awaitingDetails = true;
           try {
             const gameMode = flow.game?.gameData?.queue?.gameMode || flow.game?.map?.gameMode;
             const result = nativeApi.displayMatchDetails({
               sections: gameMode === "JADE" || gameMode === "CRAB" ? ["stats", "graph"] : ["stats", "graph", "runes"],
-              defaultSection: "graph",
+              defaultSection: "stats",
               dataSource: "eogStats",
               hideHeader: true,
               gameMode,
@@ -852,7 +885,7 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
               report("\u6253\u5F00\u539F\u751F\u7EDF\u8BA1\uFF08\u6539\u7528\u6309\u94AE\uFF09", error);
               injector.schedule();
             });
-            console.info("[ARAM Lite] \u5DF2\u8BF7\u6C42\u539F\u751F\u8FDB\u9636\u8BB0\u5F55\u56FE\u8868");
+            console.info("[ARAM Lite] \u5DF2\u8BF7\u6C42\u539F\u751F\u8FDB\u9636\u8BB0\u5F55\uFF0C\u7B49\u5F85\u5DF1\u65B9\u8EAB\u4EFD\u540E\u6253\u5F00\u56FE\u8868");
             job.later(() => {
               if (done || !current()) return;
               awaitingDetails = false;
@@ -865,27 +898,23 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
           if (awaitingDetails) return;
         }
         if (awaitingDetails) return;
-        const advanced = findAction(document, ".postgame-match-history-button") || [...document.querySelectorAll("lol-uikit-flat-button, button")].find((element) => actionable(element) && ["\u89C2\u770B\u8FDB\u9636\u8BB0\u5F55", "\u89C0\u770B\u9032\u968E\u7D00\u9304", "View Advanced Details"].includes(
-          element.textContent?.replace(/\s+/g, " ").trim() ?? ""
-        ));
-        if (advanced) {
-          awaitingDetails = click(advanced);
-          if (awaitingDetails) job.later(() => {
-            if (done || !current()) return;
-            awaitingDetails = false;
-            injector.schedule();
-          }, 1e3);
-          return;
-        }
         const scoreboard = [...document.querySelectorAll(
           ".postgame-sub-navigation-container, .jade-postgame-tabs-container"
         )].map((nav) => nav.querySelectorAll("lol-uikit-navigation-item, .jade-postgame-tab")[1]).find((tab) => actionable(tab ?? null));
         click(scoreboard || null);
       };
-      remove = injector.register(step);
-      step();
+      const safeStep = () => {
+        if (done) return;
+        try {
+          step();
+        } catch (error) {
+          report("\u7EDF\u8BA1\u754C\u9762\u5C1A\u672A\u5C31\u7EEA\uFF08\u7A0D\u540E\u91CD\u8BD5\uFF09", error);
+        }
+      };
+      remove = injector.register(safeStep);
+      safeStep();
       if (!done) cancel = job.later(() => {
-        report("\u81EA\u52A8\u6253\u5F00\u4F24\u5BB3\u7EDF\u8BA1", new Error("\u7B49\u5F85\u539F\u751F\u7EDF\u8BA1\u754C\u9762\u8D85\u65F6\uFF0C\u672C\u6B21\u8DF3\u8FC7\u81EA\u52A8\u6253\u5F00"), true);
+        report("\u81EA\u52A8\u6253\u5F00\u4F24\u5BB3\u7EDF\u8BA1", new Error("\u7B49\u5F85\u8D85\u65F6\uFF1A" + lastStage), true);
         finish(false);
       }, 15e3);
     });
@@ -906,13 +935,14 @@ function autoOpenStats({ flow, injector, scope }, waitForHonor) {
     const current = () => scope.active && job.active && config.autoOpenStats && flow.phase === "EndOfGame" && flow.phaseEpoch === epoch;
     void (async () => {
       await waitForHonor();
+      if (!current() || !await job.delay(config.openStatsDelayMs)) return;
       if (current()) await openStats(job, epoch, current);
     })().catch((error) => report("\u81EA\u52A8\u6253\u5F00\u7EDF\u8BA1", error));
   }));
 }
 
 // src/features/auto-return-lobby.ts
-function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
+function autoReturnLobby({ flow, lcu, injector, scope }) {
   let endedAt = null;
   let endEpoch = 0;
   let handledEpoch = -1;
@@ -922,13 +952,22 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
   notice.id = "aram-lite-return-countdown";
   notice.setAttribute("role", "region");
   notice.setAttribute("aria-label", "\u81EA\u52A8\u56DE\u623F\u5012\u8BA1\u65F6");
-  notice.style.cssText = 'position:fixed;left:50%;bottom:12%;transform:translateX(-50%);z-index:10001;display:flex;align-items:center;gap:16px;padding:10px 16px;border:1px solid #785a28;border-radius:5px;background:#09121bf2;color:#f0e6d2;font:14px/1.5 Arial,"Microsoft YaHei",sans-serif;box-shadow:0 4px 16px #0008';
+  notice.style.cssText = 'position:fixed;left:50%;bottom:12%;transform:translateX(-50%);z-index:10001;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 16px;border:1px solid #785a28;border-radius:5px;background:#09121bf2;color:#f0e6d2;font:14px/1.5 Arial,"Microsoft YaHei",sans-serif;box-shadow:0 4px 16px #0008';
   const label = document.createElement("span");
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = "\u53D6\u6D88\u56DE\u623F";
+  button.textContent = "\u53D6\u6D88";
+  button.dataset.action = "cancel";
   button.style.cssText = "font:inherit;color:#f0e6d2;background:#142332;border:1px solid #785a28;border-radius:3px;padding:4px 10px;cursor:pointer";
-  notice.append(label, button);
+  const immediateButton = document.createElement("button");
+  immediateButton.type = "button";
+  immediateButton.textContent = "\u7ACB\u5373\u56DE\u623F";
+  immediateButton.dataset.action = "return";
+  immediateButton.style.cssText = button.style.cssText;
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;justify-content:center;gap:12px";
+  actions.append(immediateButton, button);
+  notice.append(label, actions);
   function render() {
     const isEnd = flow.phase === "PreEndOfGame" || flow.phase === "EndOfGame";
     if (!scope.active || !config.autoReturnLobby || !isEnd || endedAt === null || cancelledEpoch === endEpoch || handledEpoch === endEpoch) {
@@ -936,7 +975,7 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
       return;
     }
     const seconds = Math.ceil(Math.max(0, endedAt + config.returnLobbyDelayMs - Date.now()) / 1e3);
-    const text = seconds > 0 ? seconds + " \u79D2\u540E\u81EA\u52A8\u56DE\u623F" : flow.phase === "PreEndOfGame" ? "\u7B49\u5F85\u7ED3\u7B97\u540E\u56DE\u623F" : "\u7B49\u5F85\u70B9\u8D5E\u5B8C\u6210\u540E\u56DE\u623F";
+    const text = seconds > 0 ? seconds + " \u79D2\u540E\u81EA\u52A8\u56DE\u623F" : "\u6B63\u5728\u56DE\u623F";
     if (label.textContent !== text) label.textContent = text;
     for (const duplicate of document.querySelectorAll("#aram-lite-return-countdown")) {
       if (duplicate !== notice) duplicate.remove();
@@ -945,8 +984,12 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
   }
   scope.own(injector.register(render));
   scope.own(() => notice.remove());
-  scope.own(injector.onClick("#aram-lite-return-countdown button", (event) => {
+  scope.own(injector.onClick("#aram-lite-return-countdown button", (event, element) => {
     stopClick(event);
+    if (element.dataset.action === "return") {
+      startReturn(true);
+      return;
+    }
     cancelledEpoch = endEpoch;
     cancel();
     render();
@@ -956,7 +999,7 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
     pending = void 0;
   }
   scope.own(cancel);
-  scope.own(flow.onChange(() => {
+  function startReturn(immediate = false) {
     const isEnd = flow.phase === "PreEndOfGame" || flow.phase === "EndOfGame";
     if (!isEnd) {
       endedAt = null;
@@ -967,21 +1010,20 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
       endedAt = Date.now();
       endEpoch++;
     }
-    if (!config.autoReturnLobby || flow.phase !== "EndOfGame") {
+    if (!config.autoReturnLobby) {
       cancel();
       return;
     }
     const epoch = endEpoch;
     if (handledEpoch === epoch || cancelledEpoch === epoch) return;
-    if (pending?.epoch === epoch && pending.delay === config.returnLobbyDelayMs) return;
+    if (pending?.epoch === epoch && (pending.immediate || !immediate && pending.delay === config.returnLobbyDelayMs)) return;
     cancel();
     const job = new Scope();
-    pending = { epoch, delay: config.returnLobbyDelayMs, scope: job };
-    const current = () => scope.active && job.active && config.autoReturnLobby && flow.phase === "EndOfGame" && endEpoch === epoch && cancelledEpoch !== epoch;
-    const remaining = Math.max(0, endedAt + config.returnLobbyDelayMs - Date.now());
+    pending = { epoch, delay: config.returnLobbyDelayMs, immediate, scope: job };
+    const current = () => scope.active && job.active && config.autoReturnLobby && (flow.phase === "PreEndOfGame" || flow.phase === "EndOfGame") && endEpoch === epoch && cancelledEpoch !== epoch;
+    const remaining = immediate ? 0 : Math.max(0, endedAt + config.returnLobbyDelayMs - Date.now());
     void (async () => {
       if (!await job.delay(remaining)) return;
-      await waitForHonor();
       if (!current()) return;
       const gameId = flow.game?.gameData?.gameId;
       if (gameId && marks.get("return-game") === String(gameId)) {
@@ -1005,7 +1047,8 @@ function autoReturnLobby({ flow, lcu, injector, scope }, waitForHonor) {
         }
       }
     })().catch((error) => report("\u81EA\u52A8\u56DE\u623F\u95F4", error));
-  }));
+  }
+  scope.own(flow.onChange(() => startReturn()));
 }
 
 // src/features/auto-honor.ts
@@ -1074,11 +1117,12 @@ function autoHonor({ flow, lcu, scope }) {
 var original = "data-aram-lite-original";
 var rendered = "data-aram-lite-rendered";
 var groupAttr = "data-aram-lite-group";
+var stateAttr = "data-aram-lite-state";
 function friendIndex(friends) {
   const index = /* @__PURE__ */ new Map();
   for (const friend of friends) {
     const name = friend.gameName?.trim() || friend.name?.trim();
-    const keys = /* @__PURE__ */ new Set([name, friend.name?.trim(), friend.puuid]);
+    const keys = /* @__PURE__ */ new Set([name, friend.name?.trim(), friend.puuid, friend.id]);
     if (name && friend.gameTag?.trim()) keys.add(name + "#" + friend.gameTag.trim());
     for (const key of keys) {
       if (!key) continue;
@@ -1113,33 +1157,164 @@ var modeNames = {
   KIWI: "\u6D77\u514B\u65AF\u5927\u4E71\u6597",
   CHERRY: "\u7ADE\u6280\u573A",
   CLASSIC: "\u53EC\u5524\u5E08\u5CE1\u8C37",
-  TFT: "\u4E91\u9876\u4E4B\u5F08"
+  TFT: "\u4E91\u9876\u4E4B\u5F08",
+  RANKED_SOLO_5x5: "\u5355\u53CC\u6392",
+  RANKED_FLEX_SR: "\u7075\u6D3B\u6392\u4F4D",
+  NORMAL: "\u5339\u914D",
+  NORMAL_TFT: "\u4E91\u9876\u5339\u914D",
+  RANKED_TFT: "\u4E91\u9876\u6392\u4F4D",
+  RANKED_TFT_DOUBLE_UP: "\u4E91\u9876\u53CC\u4EBA",
+  RANKED_TFT_TURBO: "\u4E91\u9876\u72C2\u66B4"
 };
-function statusText(friend, queueNames, queueTypes) {
+var shortModeNames = {
+  "\u968F\u673A\u5355\u4E2D\uFF1A\u5927\u6DF7\u6218\u9526\u6807\u8D5B": "\u6D77\u514B\u65AF\u9526\u6807\u8D5B",
+  "\u7ADE\u6280\u573A\uFF08PBE\u516C\u6D4B\u670D\u52A1\u5668 2v2\uFF09": "\u7ADE\u6280\u573APBE",
+  "\u53EC\u5524\u5CE1\u8C37\u76F2\u9009\u6A21\u5F0F\u81EA\u5B9A\u4E49": "\u5CE1\u8C37\u76F2\u9009\u81EA\u5B9A\u4E49",
+  "\u53EC\u5524\u5CE1\u8C37\u5F81\u53EC\u81EA\u5B9A\u4E49": "\u5CE1\u8C37\u5F81\u53EC\u81EA\u5B9A\u4E49",
+  "\u53EC\u5524\u5CE1\u8C37\u5168\u968F\u673A": "\u5CE1\u8C37\u5168\u968F\u673A",
+  "\u53EC\u5524\u5CE1\u8C37\u7535\u7ADE\u9009\u89D2": "\u5CE1\u8C37\u8D5B\u4E8B\u9009\u4EBA",
+  "\u591A\u4EBA\u7EC3\u4E60\u5DE5\u5177\u81EA\u5B9A\u4E49": "\u591A\u4EBA\u7EC3\u4E60",
+  "\u968F\u673A\u5355\u4E2D 5v5 \u7535\u8111": "\u5927\u4E71\u6597\u4EBA\u673A",
+  "\u79EF\u5206\u5BF9\u6218 \u4E94\u6392": "\u4E94\u6392\u6392\u4F4D",
+  "\u963F\u798F\u5FEB\u6253 Clash": "\u963F\u798F\u51A0\u519B\u676F",
+  "\u672B\u65E5\u673A\u5668\u4EBA - \u7EF4\u8FE6\u7684\u8BC5\u5492\uFF01": "\u672B\u65E5\u8BC5\u5492",
+  "\u672B\u65E5\u673A\u5668\u4EBA - \u7EF4\u8FE6\u7684\u90AA\u6076\uFF01": "\u672B\u65E5\u90AA\u6076",
+  "\u672B\u65E5\u673A\u5668\u4EBA - \u7EF4\u8FE6\u7684\u672B\u65E5\uFF01": "\u672B\u65E5\u7EC8\u5C40",
+  "\u672B\u65E5\u673A\u5668\u4EBA - \u56F0\u96BE": "\u672B\u65E5\u56F0\u96BE",
+  "\u300A\u8054\u76DF\u6218\u68CB\u300B\uFF08\u5DF4\u8C46\u9F99\u7684\u7ECF\u5178\u5B9D\u85CF\uFF09": "\u4E91\u9876\u5B9D\u85CF",
+  "\u300A\u8054\u76DF\u6218\u68CB\u300B\uFF08\u7075\u9B42\u4E89\u6597\uFF09": "\u4E91\u9876\u7075\u9B42\u4E89\u6597",
+  "\u300A\u8054\u76DF\u6218\u68CB\u300B\uFF08\u53CC\u4EBA\u642D\u6863\uFF09": "\u4E91\u9876\u53CC\u4EBA",
+  "\u8054\u76DF\u6218\u68CB\uFF1A\u8D85\u7EA7\u62BD\u62BD\u4E50\u81EA\u8BA2": "\u4E91\u9876\u72C2\u66B4\u81EA\u5B9A\u4E49",
+  "\u8054\u76DF\u6218\u68CB\uFF08\u6559\u5B66\u6A21\u5F0F\uFF09": "\u4E91\u9876\u6559\u5B66",
+  "\u5DF4\u8C46\u9F99\u7684KO\u7ADE\u6280\u573A": "\u4E91\u9876KO\u7ADE\u6280\u573A",
+  "\u7B2C17\u8D5B\u5B63\uFF08\u666E\u901A\u5339\u914D\uFF09": "S17\u8FD4\u573A",
+  "\u6D4B\u8BD5\uFF1A\u963F\u798F\u5FEB\u6253 1v1": "\u963F\u798F1v1\u6D4B\u8BD5"
+};
+function compactModeName(name) {
+  const short = shortModeNames[name] ?? name.trim();
+  const characters = [...short];
+  return characters.length <= 9 ? short : characters.slice(0, 8).join("") + "\u2026";
+}
+function friendParty(friend) {
+  const lol = friend.lol;
+  if (!lol?.pty || !(lol.gameStatus?.startsWith("hosting") || ["inQueue", "championSelect", "inGame"].includes(lol.gameStatus ?? "") || lol.gameStatus === "outOfGame" && ["open", "closed"].includes(lol.ptyType ?? ""))) return null;
+  try {
+    const party = JSON.parse(lol.pty);
+    if (!party || typeof party.partyId !== "string" || !party.partyId) return null;
+    const members = Array.isArray(party.summonerPuuids) && party.summonerPuuids.length ? party.summonerPuuids : party.summoners;
+    const maximum = Number(party.maxPlayers);
+    if (!Array.isArray(members) || !members.length || !Number.isInteger(maximum) || maximum < members.length) return null;
+    const queueId = Number(party.queueId);
+    return Number.isInteger(queueId) && queueId > 0 ? { queueId, occupancy: members.length + "/" + maximum } : null;
+  } catch {
+    return null;
+  }
+}
+function friendLobby(friend) {
+  return friend.lol?.gameStatus?.startsWith("hosting") || friend.lol?.gameStatus === "outOfGame" ? friendParty(friend) : null;
+}
+function statusText(friend, queueNames, queueTypes, remembered) {
   const lol = friend.lol;
   if (!lol || friend.availability === "offline") return null;
   const state = lol.gameStatus ?? "";
-  const hosting = state.startsWith("hosting");
+  const lobby = friendLobby(friend);
+  const lobbyQueue = lobby?.queueId ?? null;
+  const hosting = state.startsWith("hosting") || lobbyQueue !== null;
   const stage = hosting ? "\u5927\u5385\u4E2D" : stages[state];
   if (!stage) return null;
   const queueType = hosting && state.startsWith("hosting_") ? state.slice(8) : lol.gameQueueType;
-  const mode = hosting && queueType && (queueTypes.get(queueType) || modeNames[queueType]) || queueNames.get(Number(lol.queueId)) || queueType && queueTypes.get(queueType) || queueType && modeNames[queueType] || lol.gameMode && modeNames[lol.gameMode] || queueType || lol.gameMode;
+  const queueId = lobbyQueue ?? (Number(lol.queueId) || remembered?.queueId);
+  const mode = queueId && queueNames.get(queueId) || hosting && queueType && (modeNames[queueType] || queueTypes.get(queueType)) || queueType && queueTypes.get(queueType) || queueType && modeNames[queueType] || lol.gameMode && modeNames[lol.gameMode] || queueType || lol.gameMode;
   const duration = state === "inGame" || state === "spectating" ? formatDuration(lol.timeStamp) : null;
-  return [mode, stage, duration].filter(Boolean).join(" \xB7 ");
+  const people = (friendParty(friend) ?? remembered)?.occupancy;
+  const activity = hosting && people ? "\u5927\u5385 \xB7 " + people : state === "inQueue" && people ? "\u6392\u961F \xB7 " + people : state === "championSelect" && people ? "\u9009\u4EBA \xB7 " + people : state === "inGame" ? [duration, people].filter(Boolean).join(" \xB7 ") : stage;
+  return [
+    mode ? compactModeName(mode) : state === "inGame" ? "\u672A\u77E5\u6A21\u5F0F" : null,
+    activity,
+    state === "inGame" ? null : duration
+  ].filter(Boolean).join(" \xB7 ");
 }
 function restore(element) {
   const previous = element.getAttribute(rendered);
   if (previous !== null && element.textContent === previous) {
     element.textContent = element.getAttribute(original) ?? "";
   }
+  element.removeAttribute(stateAttr);
   element.removeAttribute(original);
   element.removeAttribute(rendered);
 }
 function friendEnhancement({ events, injector, lcu, scope }) {
+  const style = document.createElement("style");
+  style.id = "aram-lite-friend-status-colors";
+  const colors = {
+    lobby: "#36d987",
+    inGame: "#0acbe6",
+    inQueue: "#c8aa6e",
+    championSelect: "#ffad55",
+    spectating: "#b29bff",
+    watchingReplay: "#8dafff",
+    inTeamBuilder: "#63c28c",
+    teamSelect: "#63c28c",
+    tutorial: "#e8c85a"
+  };
+  style.textContent = Object.entries(colors).map(([state, color]) => "[" + stateAttr + '="' + state + '"]{color:' + color + "!important}").join("");
+  scope.own(() => style.remove());
   let index = /* @__PURE__ */ new Map();
   let groups = /* @__PURE__ */ new Map();
   let queueNames = /* @__PURE__ */ new Map();
   let queueTypes = /* @__PURE__ */ new Map();
+  const partySizes = /* @__PURE__ */ new Map();
+  const partyStorageKey = "aram-lite:friend-party-sizes";
+  const maxPartyAge = 6 * 60 * 60 * 1e3;
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(partyStorageKey) ?? "[]");
+    if (Array.isArray(saved)) for (const entry of saved) {
+      if (!Array.isArray(entry) || typeof entry[0] !== "string" || !entry[0]) continue;
+      const value = entry[1];
+      if (!value || !Number.isInteger(value.queueId) || value.queueId <= 0 || typeof value.occupancy !== "string" || !/^[1-9][0-9]*\/[1-9][0-9]*$/.test(value.occupancy) || typeof value.state !== "string" || value.gameId !== void 0 && typeof value.gameId !== "string" || !Number.isFinite(value.updatedAt) || Date.now() - value.updatedAt > maxPartyAge || value.updatedAt > Date.now() + 6e4) continue;
+      const [count, maximum] = value.occupancy.split("/").map(Number);
+      if (count <= maximum) partySizes.set(entry[0], value);
+    }
+  } catch {
+  }
+  function saveParties() {
+    try {
+      if (partySizes.size) window.sessionStorage.setItem(partyStorageKey, JSON.stringify([...partySizes]));
+      else window.sessionStorage.removeItem(partyStorageKey);
+    } catch {
+    }
+  }
+  const friendKey = (friend) => friend.puuid || friend.id;
+  function rememberParties(friends) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const friend of friends) {
+      const key = friendKey(friend);
+      if (!key) continue;
+      seen.add(key);
+      const state = friend.lol?.gameStatus ?? "";
+      const live = friendParty(friend);
+      const previous = partySizes.get(key);
+      if (friend.availability === "offline") {
+        partySizes.delete(key);
+        continue;
+      }
+      if (live) {
+        partySizes.set(key, { ...live, state, gameId: state === "inGame" ? friend.lol?.gameId : void 0, updatedAt: Date.now() });
+        continue;
+      }
+      if (!previous) continue;
+      const queueId = Number(friend.lol?.queueId);
+      const gameId = Number(friend.lol?.gameId) > 0 ? friend.lol?.gameId : void 0;
+      if (Date.now() - previous.updatedAt > maxPartyAge || !["inQueue", "championSelect", "inGame"].includes(state) || queueId > 0 && queueId !== previous.queueId || previous.state === "inGame" && state !== "inGame" || state === "inGame" && previous.gameId && gameId && previous.gameId !== gameId) {
+        partySizes.delete(key);
+      } else {
+        partySizes.set(key, { ...previous, state, gameId: state === "inGame" ? gameId || previous.gameId : void 0 });
+      }
+    }
+    for (const key of partySizes.keys()) if (!seen.has(key)) partySizes.delete(key);
+    saveParties();
+  }
+  scope.own(() => partySizes.clear());
   let loading = false;
   let dirty = false;
   let scheduled = false;
@@ -1164,6 +1339,7 @@ function friendEnhancement({ events, injector, lcu, scope }) {
       const friends = await lcu.get(uri.friends);
       if (!scope.active) return;
       index = friendIndex(friends);
+      rememberParties(friends);
       const counts = /* @__PURE__ */ new Map();
       for (const friend of friends) {
         const gameId = friend.lol?.gameId;
@@ -1193,8 +1369,9 @@ function friendEnhancement({ events, injector, lcu, scope }) {
     void lcu.get(uri.queues).then((queues) => {
       if (!scope.active) return;
       queuesLoaded = true;
-      queueNames = new Map(queues.map((queue) => [queue.id, queue.name || queue.description || ""]));
-      queueTypes = new Map(queues.filter((queue) => queue.type).map((queue) => [queue.type, queue.name || queue.description || ""]));
+      const queueName = (queue) => queue.id === 2400 || queue.type === "KIWI" ? "\u6D77\u514B\u65AF\u5927\u4E71\u6597" : queue.id === 450 || queue.type === "ARAM_UNRANKED_5x5" ? "\u5927\u4E71\u6597" : queue.id === 400 || queue.id === 430 ? "\u5339\u914D" : queue.type && queue.type !== "CHERRY" && queue.type !== "NORMAL" && modeNames[queue.type] || queue.name || queue.description || "";
+      queueNames = new Map(queues.map((queue) => [queue.id, queueName(queue)]));
+      queueTypes = new Map(queues.filter((queue) => queue.type).map((queue) => [queue.type, queueName(queue)]));
       injector.schedule();
     }).catch((error) => report("\u6A21\u5F0F\u540D\u79F0", error)).finally(() => {
       queuesLoading = false;
@@ -1205,6 +1382,10 @@ function friendEnhancement({ events, injector, lcu, scope }) {
     if (enabled() && !wasEnabled) {
       failures = 0;
       void refresh();
+    }
+    if (!enabled()) {
+      partySizes.clear();
+      saveParties();
     }
     wasEnabled = enabled();
     loadQueues();
@@ -1217,14 +1398,17 @@ function friendEnhancement({ events, injector, lcu, scope }) {
   void refresh();
   loadQueues();
   scope.own(injector.register(() => {
+    if (config.friendStatus) {
+      if (!style.isConnected) document.head?.append(style);
+    } else style.remove();
     const members = document.querySelectorAll(
-      '.lol-social-lower-pane-container [class*="lol-social-roster-member"]'
+      '.lol-social-lower-pane-container [class*="lol-social-roster-member"], .lol-social-lower-pane-container lol-social-roster-member'
     );
     for (const member of members) {
       const status = member.querySelector("span.status-message");
       if (!status) continue;
       const name = member.querySelector(".member-name")?.textContent?.trim();
-      const key = member.getAttribute("data-puuid") || name;
+      const key = member.getAttribute("data-puuid") || member.querySelector(".member[data-id]")?.getAttribute("data-id") || name;
       const matches = key ? index.get(key) : void 0;
       const friend = matches?.length === 1 ? matches[0] : void 0;
       if (!enabled() || !friend || member.classList.contains("offline") || friend.availability === "offline") {
@@ -1233,13 +1417,18 @@ function friendEnhancement({ events, injector, lcu, scope }) {
         continue;
       }
       const lol = friend.lol;
-      const detail = config.friendStatus ? statusText(friend, queueNames, queueTypes) : null;
+      const remembered = partySizes.get(friendKey(friend) ?? "");
+      const detail = config.friendStatus ? statusText(friend, queueNames, queueTypes, remembered) : null;
       const group = config.friendGroups && lol?.gameStatus === "inGame" ? groups.get(lol.gameId || "") : void 0;
       if (!detail && !group) {
         restore(status);
         member.removeAttribute(groupAttr);
         continue;
       }
+      if (detail) {
+        const state = lol?.gameStatus?.startsWith("hosting") || friendLobby(friend) !== null ? "lobby" : lol?.gameStatus;
+        if (state && status.getAttribute(stateAttr) !== state) status.setAttribute(stateAttr, state);
+      } else status.removeAttribute(stateAttr);
       const previous = status.getAttribute(rendered);
       if (previous === null || status.textContent !== previous) {
         status.setAttribute(original, status.textContent ?? "");
@@ -1292,14 +1481,14 @@ function controlPanel({ injector, scope }) {
     const label = switches.find(([name]) => name === key)[1];
     return '<label class="switch"><input type="checkbox" name="' + key + '">' + label + "</label>";
   }
-  shadow.innerHTML = '<style>:host{all:initial;position:fixed;right:12px;bottom:calc(40px + 0.5cm);text-align:right;z-index:10000;font:13px/1.5 Arial,"Microsoft YaHei",sans-serif;color:#f0e6d2}*{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer;color:inherit;background:#142332;border:1px solid #785a28;border-radius:3px;padding:5px 10px}button:hover{background:#20394b}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #c8aa6e;outline-offset:2px}section{width:350px;max-width:calc(100vw - 24px);max-height:calc(100vh - 100px - 0.5cm);text-align:left;overflow:auto;margin-bottom:8px;background:#09121b;border:1px solid #785a28;border-radius:5px;padding:14px;box-shadow:0 6px 20px #0008}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}h2{font-size:15px;margin:0}fieldset{min-width:0;margin:0 0 12px;padding:8px 0 0;border:0;border-top:1px solid #34414c}fieldset:last-child{margin-bottom:0}legend{padding:0 8px 0 0;color:#c8aa6e;font-weight:bold;font-size:12px}.row,.switches{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:8px 10px}.row+.row{margin-top:9px}.switch{display:flex;align-items:center;gap:6px;cursor:pointer}.switch input{margin:0;accent-color:#c8aa6e}.parameter{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:12px}input[type=number],select{flex:1;min-width:0;width:0;padding:4px;color:#f0e6d2;background:#142332;border:1px solid #435261;border-radius:3px}p{font-size:12px;color:#b9b8b2;margin:8px 0 0}.status{min-height:18px;color:#c8aa6e}footer{display:flex;align-items:center;justify-content:space-between;margin-top:8px}footer span{font-size:12px;color:#b9b8b2}</style><section hidden role="dialog" aria-label="ARAM \u8BBE\u7F6E"><header><h2>ARAM \u8BBE\u7F6E</h2><button type="button" data-action="close" aria-label="\u5173\u95ED\u8BBE\u7F6E">\xD7</button></header><form><fieldset><legend>\u5BF9\u5C40\u5F00\u59CB</legend><div class="row">' + checkbox("quickLobby") + '</div><div class="row">' + checkbox("autoAccept") + '<label class="parameter">\u63A5\u53D7\u5EF6\u8FDF<input aria-label="\u63A5\u53D7\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF09" title="\u5355\u4F4D\uFF1A\u6BEB\u79D2" name="autoAcceptDelayMs" type="number" min="0" max="15000" step="1" required></label></div></fieldset><fieldset><legend>\u5BF9\u5C40\u7ED3\u675F</legend><div class="row">' + checkbox("autoHonor") + '<label class="parameter">\u70B9\u8D5E\u7C7B\u578B<select name="honorCategory"><option value="RANDOM">\u968F\u673A</option><option value="HEART">\u53CB\u5584</option><option value="COOL">\u51B7\u9759</option><option value="SHOTCALLER">\u6307\u6325</option></select></label></div><div class="row">' + checkbox("autoOpenStats") + '</div><div class="row">' + checkbox("autoReturnLobby") + '<label class="parameter">\u56DE\u623F\u5EF6\u8FDF<input aria-label="\u7ED3\u7B97\u51FA\u73B0\u540E\u7684\u56DE\u623F\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF09" title="\u4ECE\u7ED3\u7B97\u6216\u70B9\u8D5E\u754C\u9762\u51FA\u73B0\u65F6\u8BA1\u65F6\uFF0C15000 \u6BEB\u79D2 = 15 \u79D2" name="returnLobbyDelayMs" type="number" min="0" max="30000" step="1" required></label></div></fieldset><fieldset><legend>\u5927\u4E71\u6597\u9009\u4EBA</legend><div class="row">' + checkbox("benchNoCooldown") + checkbox("champSelectQuit") + '</div><div class="row">' + checkbox("rememberSpells") + '</div></fieldset><fieldset><legend>\u597D\u53CB\u5217\u8868</legend><div class="switches">' + checkbox("friendStatus") + checkbox("friendGroups") + '</div></fieldset></form><p class="status" role="status" aria-live="polite"></p><footer><span>\u66F4\u6539\u81EA\u52A8\u4FDD\u5B58</span><button type="button" data-action="reset">\u6062\u590D\u9ED8\u8BA4</button></footer></section><button type="button" data-action="toggle" aria-expanded="false">ARAM \u8BBE\u7F6E \xB7 F8</button>';
+  shadow.innerHTML = '<style>:host{all:initial;position:fixed;right:12px;bottom:calc(40px + 0.5cm);text-align:right;z-index:10000;font:13px/1.5 Arial,"Microsoft YaHei",sans-serif;color:#f0e6d2}*{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer;color:inherit;background:#142332;border:1px solid #785a28;border-radius:3px;padding:5px 10px}button:hover{background:#20394b}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #c8aa6e;outline-offset:2px}section{width:350px;max-width:calc(100vw - 24px);max-height:calc(100vh - 100px - 0.5cm);text-align:left;overflow:auto;margin-bottom:8px;background:#09121b;border:1px solid #785a28;border-radius:5px;padding:14px;box-shadow:0 6px 20px #0008}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}h2{font-size:15px;margin:0}fieldset{min-width:0;margin:0 0 12px;padding:8px 0 0;border:0;border-top:1px solid #34414c}fieldset:last-child{margin-bottom:0}legend{padding:0 8px 0 0;color:#c8aa6e;font-weight:bold;font-size:12px}.row,.switches{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:8px 10px}.row+.row{margin-top:9px}.switch{display:flex;align-items:center;gap:6px;cursor:pointer}.switch input{margin:0;accent-color:#c8aa6e}.parameter{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:12px}input[type=number],select{flex:1;min-width:0;width:0;padding:4px;color:#f0e6d2;background:#142332;border:1px solid #435261;border-radius:3px}p{font-size:12px;color:#b9b8b2;margin:8px 0 0}.status{min-height:18px;color:#c8aa6e}footer{display:flex;align-items:center;justify-content:space-between;margin-top:8px}footer span{font-size:12px;color:#b9b8b2}</style><section hidden role="dialog" aria-label="ARAM \u8BBE\u7F6E"><header><h2>ARAM \u8BBE\u7F6E</h2><button type="button" data-action="close" aria-label="\u5173\u95ED\u8BBE\u7F6E">\xD7</button></header><form><fieldset><legend>\u5BF9\u5C40\u5F00\u59CB</legend><div class="row">' + checkbox("quickLobby") + '</div><div class="row">' + checkbox("autoAccept") + '<label class="parameter">\u63A5\u53D7\u5EF6\u8FDF<input aria-label="\u63A5\u53D7\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF09" title="\u5355\u4F4D\uFF1A\u6BEB\u79D2" name="autoAcceptDelayMs" type="number" min="0" max="15000" step="1" required></label></div></fieldset><fieldset><legend>\u5BF9\u5C40\u7ED3\u675F</legend><div class="row">' + checkbox("autoHonor") + '<label class="parameter">\u70B9\u8D5E\u7C7B\u578B<select name="honorCategory"><option value="RANDOM">\u968F\u673A</option><option value="HEART">\u53CB\u5584</option><option value="COOL">\u51B7\u9759</option><option value="SHOTCALLER">\u6307\u6325</option></select></label></div><div class="row">' + checkbox("autoOpenStats") + '<label class="parameter">\u7EDF\u8BA1\u5EF6\u8FDF<input aria-label="\u7EDF\u8BA1\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF09" title="\u70B9\u8D5E\u5904\u7406\u7ED3\u675F\u540E\u7B49\u5F85\uFF0C\u5355\u4F4D\uFF1A\u6BEB\u79D2" name="openStatsDelayMs" type="number" min="0" max="15000" step="1" required></label></div><div class="row">' + checkbox("autoReturnLobby") + '<label class="parameter">\u56DE\u623F\u5EF6\u8FDF<input aria-label="\u7ED3\u7B97\u51FA\u73B0\u540E\u7684\u56DE\u623F\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF09" title="\u4ECE\u7ED3\u7B97\u6216\u70B9\u8D5E\u754C\u9762\u51FA\u73B0\u65F6\u8BA1\u65F6\uFF0C15000 \u6BEB\u79D2 = 15 \u79D2" name="returnLobbyDelayMs" type="number" min="0" max="30000" step="1" required></label></div></fieldset><fieldset><legend>\u5927\u4E71\u6597\u9009\u4EBA</legend><div class="row">' + checkbox("benchNoCooldown") + checkbox("champSelectQuit") + '</div><div class="row">' + checkbox("rememberSpells") + '</div></fieldset><fieldset><legend>\u597D\u53CB\u5217\u8868</legend><div class="switches">' + checkbox("friendStatus") + checkbox("friendGroups") + '</div></fieldset></form><p class="status" role="status" aria-live="polite"></p><footer><span>\u66F4\u6539\u81EA\u52A8\u4FDD\u5B58</span><button type="button" data-action="reset">\u6062\u590D\u9ED8\u8BA4</button></footer></section><button type="button" data-action="toggle" aria-expanded="false">ARAM \u8BBE\u7F6E \xB7 F8</button>';
   const panel = shadow.querySelector("section");
   const toggle = shadow.querySelector('[data-action="toggle"]');
   const status = shadow.querySelector(".status");
   let previousFocus = null;
   function sync() {
     for (const [key] of switches) shadow.querySelector('[name="' + key + '"]').checked = config[key];
-    for (const key of ["autoAcceptDelayMs", "returnLobbyDelayMs"]) {
+    for (const key of ["autoAcceptDelayMs", "openStatsDelayMs", "returnLobbyDelayMs"]) {
       shadow.querySelector('[name="' + key + '"]').value = String(config[key]);
     }
     shadow.querySelector('[name="honorCategory"]').value = config.honorCategory;
@@ -1320,11 +1509,11 @@ function controlPanel({ injector, scope }) {
     const flag = switches.find(([key]) => key === target.name);
     if (flag) {
       saved(updateConfig({ [flag[0]]: target.checked }));
-    } else if (target.name === "autoAcceptDelayMs" || target.name === "returnLobbyDelayMs") {
+    } else if (target.name === "autoAcceptDelayMs" || target.name === "openStatsDelayMs" || target.name === "returnLobbyDelayMs") {
       const input = target;
       const number = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(number) || !Number.isInteger(number) || !input.validity.valid) {
-        status.textContent = "\u8BF7\u8F93\u5165\u8303\u56F4\u5185\u7684\u6574\u6570\uFF1A\u63A5\u53D7 0\u201315000\uFF0C\u56DE\u623F 0\u201330000 \u6BEB\u79D2\u3002";
+        status.textContent = "\u8BF7\u8F93\u5165\u8303\u56F4\u5185\u7684\u6574\u6570\uFF1A\u63A5\u53D7\u53CA\u7EDF\u8BA1 0\u201315000\uFF0C\u56DE\u623F 0\u201330000 \u6BEB\u79D2\u3002";
         sync();
         return;
       }
@@ -1389,7 +1578,7 @@ var Plugin = class {
     champSelectQuit(context);
     const waitForHonor = autoHonor(context);
     autoOpenStats(context, waitForHonor);
-    autoReturnLobby(context, waitForHonor);
+    autoReturnLobby(context);
     friendEnhancement(context);
     quickLobby(context);
     controlPanel(context);

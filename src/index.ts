@@ -33,7 +33,7 @@ class Plugin {
     champSelectQuit(context);
     const waitForHonor = autoHonor(context);
     autoOpenStats(context, waitForHonor);
-    autoReturnLobby(context, waitForHonor);
+    autoReturnLobby(context);
     friendEnhancement(context);
     quickLobby(context);
     controlPanel(context);

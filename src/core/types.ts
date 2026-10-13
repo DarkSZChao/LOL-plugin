@@ -31,6 +31,8 @@ export interface Friend {
   lol?: {
     gameId?: string;
     gameStatus?: string;
+    pty?: string;
+    ptyType?: string;
     gameMode?: string;
     gameQueueType?: string;
     queueId?: string;

@@ -17,7 +17,7 @@ import { quickLobby } from '../../src/features/quick-lobby';
 import { autoHonor } from '../../src/features/auto-honor';
 import { autoOpenStats } from '../../src/features/auto-open-stats';
 import { autoReturnLobby } from '../../src/features/auto-return-lobby';
-import { friendEnhancement, formatDuration } from '../../src/features/friend-enhancement';
+import { friendEnhancement, formatDuration, compactModeName } from '../../src/features/friend-enhancement';
 
 const sleep = (ms = 45) => new Promise(resolve => setTimeout(resolve, ms));
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -332,18 +332,17 @@ test('honor never uses opponents, zero votes, or a ballot already handled manual
   }
 });
 
-test('auto return waits for honor and cancels when the player leaves EndOfGame', async () => {
+test('auto return runs at its deadline and cancels when the player leaves EndOfGame', async () => {
   const hold = deferred<void>();
   const f = fixture();
   const originalDelay = config.returnLobbyDelayMs;
   (config as { returnLobbyDelayMs: number }).returnLobbyDelayMs = 20;
   try {
     document.body.innerHTML = '<div class="match-details-root match-details-no-header"><div class="match-graph-container"><div class="match-graph-display"></div></div></div>';
-    autoReturnLobby(f, () => hold.promise);
+    autoReturnLobby(f);
     f.start(); await sleep();
-    f.phase('EndOfGame'); await sleep();
-    assert.equal(f.writes().length, 0);
-    hold.resolve(); await sleep(100);
+    f.phase('EndOfGame'); await sleep(100);
+    hold.resolve();
     await waitUntil(() => f.writes('/lol-lobby/v2/play-again').length === 1);
     assert.equal(f.writes('/lol-lobby/v2/play-again').length, 1);
     f.phase('Lobby'); f.phase('EndOfGame'); f.phase('ChampSelect'); await sleep();
@@ -372,7 +371,7 @@ test('friend modes, elapsed time and same-game labels self-heal and restore nati
   try {
     friendEnhancement(f); f.start(); await sleep();
     document.body.innerHTML = markup; await sleep();
-    assert.match(document.querySelector('.status-message')!.textContent!, /极地大乱斗 · 游戏中 · 01:\d{2} · 同局1/);
+    assert.match(document.querySelector('.status-message')!.textContent!, /大乱斗 · 01:\d{2} · 同局1/);
     assert.equal(document.querySelectorAll('[data-aram-lite-group]').length, 2);
     document.body.innerHTML = markup; await sleep();
     assert.equal(document.querySelectorAll('[data-aram-lite-rendered]').length, 2);
@@ -608,7 +607,7 @@ test('live return toggle cancels pending work and parameter changes reschedule i
   const f = fixture();
   try {
     document.body.innerHTML = '<div class="match-details-root match-details-no-header"><div class="match-graph-container"><div class="match-graph-display"></div></div></div>';
-    autoReturnLobby(f, () => Promise.resolve());
+    autoReturnLobby(f);
     updateConfig({ returnLobbyDelayMs: 50 }); f.start(); await sleep();
     f.phase('EndOfGame'); await sleep(10);
     updateConfig({ autoReturnLobby: false });
@@ -712,9 +711,9 @@ test('friend grouping and mode/time can be independently toggled and disabled qu
         + friend.gameName + '</span><span class="status-message">游戏中</span></div>').join('') + '</div>';
     await sleep();
     const status = document.querySelector<HTMLElement>('.status-message')!;
-    assert.match(status.textContent!, /极地大乱斗.*同局1/);
+    assert.match(status.textContent!, /大乱斗.*同局1/);
     updateConfig({ friendGroups: false }); await sleep();
-    assert.match(status.textContent!, /极地大乱斗/);
+    assert.match(status.textContent!, /大乱斗/);
     assert.doesNotMatch(status.textContent!, /同局/);
     updateConfig({ friendStatus: false }); await sleep();
     assert.equal(status.textContent, '游戏中');
@@ -724,7 +723,7 @@ test('friend grouping and mode/time can be independently toggled and disabled qu
     updateConfig({ friendGroups: true }); await sleep();
     assert.equal(status.textContent, '游戏中 · 同局1');
     updateConfig({ friendGroups: false, friendStatus: true }); await sleep();
-    assert.match(status.textContent!, /极地大乱斗/);
+    assert.match(status.textContent!, /大乱斗/);
     assert.doesNotMatch(status.textContent!, /同局/);
     assert.equal(f.observers, 1);
     assert.equal(f.subscriptions.get(uri.friends)!.length, 1);
@@ -876,7 +875,7 @@ test('postgame opens native scoreboard, advanced details and damage graph with a
   let scoreboardClicks = 0, advancedClicks = 0, graphClicks = 0;
   try {
     updateConfig({ autoReturnLobby: false });
-    autoOpenStats(f, () => Promise.resolve());
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, () => Promise.resolve());
     updateConfig({ returnLobbyDelayMs: 150 });
     f.start(); await sleep();
     f.phase('EndOfGame');
@@ -893,7 +892,7 @@ test('postgame opens native scoreboard, advanced details and damage graph with a
         advancedClicks++;
         const details = document.createElement('div');
         details.className = 'match-details-root match-details-no-header';
-        details.innerHTML = '<div class="rcp-fe-lol-match-details-overlay-sub-nav">'
+        details.innerHTML = '<span class="team-avatar-wrapper current"></span><div class="rcp-fe-lol-match-details-overlay-sub-nav">'
           + '<lol-uikit-navigation-item data-name="stats">Stats</lol-uikit-navigation-item>'
           + '<lol-uikit-navigation-item data-name="graph">Graph</lol-uikit-navigation-item></div>';
         details.querySelector('[data-name="graph"]')!.addEventListener('click', () => {
@@ -923,7 +922,7 @@ test('Mayhem native tabs are supported and closing stats does not repeatedly reo
   let scoreboardClicks = 0, advancedClicks = 0, graphClicks = 0;
   try {
     updateConfig({ autoReturnLobby: false });
-    autoOpenStats(f, () => Promise.resolve());
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, () => Promise.resolve());
     updateConfig({ returnLobbyDelayMs: 250 });
     f.start(); await sleep();
     document.body.innerHTML = '<div class="jade-postgame-tabs-container"><div class="jade-postgame-tab active">Progression</div>'
@@ -962,7 +961,7 @@ test('missing, disabled or hidden native stats controls are ignored and cancella
   let clicks = 0;
   try {
     updateConfig({ autoReturnLobby: false });
-    autoOpenStats(f, () => Promise.resolve());
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, () => Promise.resolve());
     updateConfig({ returnLobbyDelayMs: 0 });
     f.start(); await sleep();
     document.body.innerHTML = '<button class="postgame-match-history-button" disabled>Details</button>';
@@ -1002,7 +1001,7 @@ test('friend names with trailing whitespace match the roster and display the liv
     friendEnhancement(f); f.start(); await sleep();
     document.body.innerHTML = markup;
     await waitUntil(() => document.querySelector('.status-message')?.textContent?.includes('竞技场3x6') === true);
-    assert.match(document.querySelector('.status-message')!.textContent!, /竞技场3x6 · 游戏中 · 01:\d{2}/);
+    assert.match(document.querySelector('.status-message')!.textContent!, /竞技场3x6 · 01:\d{2}/);
     document.body.innerHTML = markup;
     await waitUntil(() => document.querySelector('.status-message')?.textContent?.includes('竞技场3x6') === true);
     updateConfig({ friendStatus: false }); await sleep();
@@ -1017,13 +1016,13 @@ test('return countdown starts at the first honor screen and does not restart whe
   const f = fixture();
   const realNow = Date.now;
   try {
-    autoReturnLobby(f, () => Promise.resolve());
+    autoReturnLobby(f);
     updateConfig({ returnLobbyDelayMs: 200, autoOpenStats: false });
     f.start(); await sleep();
     let clock = realNow();
     Date.now = () => clock;
     f.phase('PreEndOfGame');
-    clock += 190;
+    await sleep(190); clock += 190;
     const started = performance.now();
     f.phase('EndOfGame');
     Date.now = realNow;
@@ -1033,15 +1032,15 @@ test('return countdown starts at the first honor screen and does not restart whe
   } finally { Date.now = realNow; f.close(); }
 });
 
-test('return counts time while honor is pending and returns immediately after honor if its deadline has passed', async () => {
+test('return runs in PreEndOfGame without waiting for settlement or honor', async () => {
   const f = fixture();
   const honor = deferred<void>();
   try {
-    autoReturnLobby(f, () => honor.promise);
+    autoReturnLobby(f);
     updateConfig({ returnLobbyDelayMs: 100 });
     f.start(); await sleep();
-    f.phase('EndOfGame'); await sleep(140);
-    assert.equal(f.writes().length, 0);
+    f.phase('PreEndOfGame'); await sleep(140);
+    assert.equal(f.writes('/lol-lobby/v2/play-again').length, 1);
     const released = performance.now();
     honor.resolve();
     await waitUntil(() => f.writes('/lol-lobby/v2/play-again').length === 1);
@@ -1065,13 +1064,13 @@ test('all combinations of honor, statistics and return switches work independent
       const honorEnabled = !!(flags & 1), statsEnabled = !!(flags & 2), returnEnabled = !!(flags & 4);
       updateConfig({ autoHonor: honorEnabled, autoOpenStats: statsEnabled, autoReturnLobby: returnEnabled, returnLobbyDelayMs: 200 });
       const waitForHonor = autoHonor(f);
-      autoOpenStats(f, waitForHonor); autoReturnLobby(f, waitForHonor);
+      updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, waitForHonor); autoReturnLobby(f);
       f.start(); await sleep();
       document.body.innerHTML = '<button class="postgame-match-history-button">Details</button>';
       document.querySelector('button')!.addEventListener('click', () => {
         order.push('stats');
         document.body.insertAdjacentHTML('beforeend', '<div class="match-details-root match-details-no-header">'
-          + '<div class="rcp-fe-lol-match-details-overlay-sub-nav"><button data-name="graph">Graph</button></div></div>');
+          + '<span class="team-avatar-wrapper current"></span><div class="rcp-fe-lol-match-details-overlay-sub-nav"><button data-name="graph">Graph</button></div></div>');
         document.querySelector('[data-name="graph"]')!.addEventListener('click', () => {
           order.push('graph');
           document.querySelector('.match-details-root')!.insertAdjacentHTML('beforeend',
@@ -1094,7 +1093,7 @@ test('return notice heals after redraw, cancels only this game and resumes next 
   const f = fixture();
   try {
     updateConfig({ returnLobbyDelayMs: 300 });
-    autoReturnLobby(f, async () => {});
+    autoReturnLobby(f);
     f.start(); await sleep();
     f.phase('PreEndOfGame');
     await waitUntil(() => !!document.querySelector('#aram-lite-return-countdown'));
@@ -1104,7 +1103,7 @@ test('return notice heals after redraw, cancels only this game and resumes next 
     await waitUntil(() => notice.isConnected);
     document.body.append(notice.cloneNode(true));
     await waitUntil(() => document.querySelectorAll('#aram-lite-return-countdown').length === 1);
-    notice.querySelector<HTMLButtonElement>('button')!.click();
+    notice.querySelector<HTMLButtonElement>('[data-action="cancel"]')!.click();
     assert.equal(document.querySelector('#aram-lite-return-countdown'), null);
     assert.equal(config.autoReturnLobby, true);
     updateConfig({ returnLobbyDelayMs: 0 });
@@ -1117,15 +1116,15 @@ test('return notice heals after redraw, cancels only this game and resumes next 
   } finally { f.close(); }
 });
 
-test('return can be cancelled while honor is pending, and notice hides when disabled or leaving', async () => {
+test('return can be cancelled before its deadline, and notice hides when disabled or leaving', async () => {
   const f = fixture();
   const honor = deferred<void>();
   try {
-    updateConfig({ returnLobbyDelayMs: 0 });
-    autoReturnLobby(f, () => honor.promise);
+    updateConfig({ returnLobbyDelayMs: 300 });
+    autoReturnLobby(f);
     f.start(); await sleep(); f.phase('EndOfGame');
     await waitUntil(() => !!document.querySelector('#aram-lite-return-countdown'));
-    document.querySelector<HTMLButtonElement>('#aram-lite-return-countdown button')!.click();
+    document.querySelector<HTMLButtonElement>('#aram-lite-return-countdown [data-action="cancel"]')!.click();
     honor.resolve(); await sleep();
     assert.equal(f.writes('/lol-lobby/v2/play-again').length, 0);
     f.phase('Lobby');
@@ -1224,7 +1223,10 @@ test('friend details show verified stages and modes without using game timestamp
       puuid: String(i), gameName: 'Friend' + i, availability: 'chat',
       lol: { gameStatus: state, gameQueueType: 'KIWI', timeStamp: String(Date.now() - 65000) },
     })));
-    if (request.endpoint === uri.queues) return json([{ id: 2400, type: 'KIWI', name: '海克斯大乱斗' }]);
+    if (request.endpoint === uri.queues) return json([
+      { id: 2400, type: 'KIWI', name: '随机单中：大混战' },
+      { id: 2450, type: 'KIWI', name: '随机单中：大混战：经典风格' },
+    ]);
   });
   const markup = '<div class="lol-social-lower-pane-container">' + states.map((state, i) =>
     '<div class="lol-social-roster-member" data-puuid="' + i + '"><span class="member-name">Friend' + i +
@@ -1236,7 +1238,7 @@ test('friend details show verified stages and modes without using game timestamp
     assert.equal(values[0], '海克斯大乱斗 · 大厅中');
     assert.equal(values[1], '海克斯大乱斗 · 排队中');
     assert.equal(values[2], '海克斯大乱斗 · 选人中');
-    assert.match(values[3]!, /海克斯大乱斗 · 游戏中 · 01:[0-9]{2}/);
+    assert.match(values[3]!, /海克斯大乱斗 · 01:[0-9]{2}/);
     assert.match(values[4]!, /海克斯大乱斗 · 观战中 · 01:[0-9]{2}/);
     assert.equal(values[5], '海克斯大乱斗 · 观看回放');
     assert.equal(values[6], '海克斯大乱斗 · 组队中');
@@ -1267,7 +1269,7 @@ test('friend status updates remove stale timers and groups, preserve offline and
       '<span class="member-name">Alice</span><span class="status-message">在线</span></div></div>';
     await sleep();
     const status = document.querySelector('.status-message')!;
-    assert.match(status.textContent!, /游戏中.*同局1/);
+    assert.match(status.textContent!, /海克斯大乱斗.*同局1/);
     state = 'championSelect'; f.emit(uri.friends, {});
     await waitUntil(() => status.textContent === '海克斯大乱斗 · 选人中');
     assert.equal(document.querySelector('[data-aram-lite-group]'), null);
@@ -1286,7 +1288,7 @@ test('stats clicks visible advanced record before graph despite hidden stale con
     const order: string[] = [];
     try {
       updateConfig({ autoReturnLobby: false });
-      autoOpenStats(f, () => honor.promise);
+      updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, () => honor.promise);
       f.start(); await sleep();
       document.body.innerHTML =
         '<div hidden><button class="postgame-match-history-button">旧记录</button>' +
@@ -1306,7 +1308,7 @@ test('stats clicks visible advanced record before graph despite hidden stale con
         f.scope.later(() => {
           const details = document.createElement('div');
           details.className = 'match-details-root match-details-no-header';
-          details.innerHTML = '<div class="rcp-fe-lol-match-details-overlay-sub-nav">' +
+          details.innerHTML = '<span class="team-avatar-wrapper current"></span><div class="rcp-fe-lol-match-details-overlay-sub-nav">' +
             '<button data-name="graph" hidden>旧图表</button><button data-name="graph">图表</button></div>';
           details.querySelectorAll('button')[1].addEventListener('click', () => {
             order.push('graph');
@@ -1382,7 +1384,7 @@ test('native statistics API opens Graph after honor without requiring the advanc
   } } });
   try {
     updateConfig({ autoReturnLobby: false });
-    autoOpenStats(f, () => honor.promise);
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, () => honor.promise);
     f.start(); await sleep();
     f.emit(uri.game, { gameData: { gameId: f.gameId, queue: { id: 2400, gameMode: 'KIWI' } } });
     f.phase('EndOfGame'); await sleep();
@@ -1391,7 +1393,7 @@ test('native statistics API opens Graph after honor without requiring the advanc
     await waitUntil(() => calls.length === 1);
     assert.equal(moduleName, 'rcp-fe-lol-match-history');
     const options = calls[0];
-    assert.equal(options.defaultSection, 'graph');
+    assert.equal(options.defaultSection, 'stats');
     assert.equal(options.dataSource, 'eogStats');
     assert.equal(options.hideHeader, true);
     assert.equal(options.gameMode, 'KIWI');
@@ -1405,13 +1407,13 @@ test('native statistics API opens Graph after honor without requiring the advanc
   } finally { honor.resolve(); f.close(); }
 });
 
-test('native statistics failures use advanced button fallback and late modules never open after phase exit', async () => {
+test('native statistics prefer the advanced button and late modules never open after phase exit', async () => {
   const f = fixture();
   const api = deferred<unknown>();
   const order: string[] = [];
   Object.assign(f.dom.window, { rcp: { whenReady: () => api.promise } });
   try {
-    autoOpenStats(f, async () => {});
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, async () => {});
     f.start(); await sleep(); f.phase('EndOfGame');
     f.phase('Lobby');
     api.resolve({ displayMatchDetails() { order.push('native'); throw new Error('unavailable'); } });
@@ -1424,10 +1426,10 @@ test('native statistics failures use advanced button fallback and late modules n
         '<div class="match-graph-container"><div class="match-graph-display"></div></div></div>');
     });
     f.phase('EndOfGame');
-    await waitUntil(() => order.length === 2);
-    assert.deepEqual(order, ['native', 'button']);
+    await waitUntil(() => order.length === 1);
+    assert.deepEqual(order, ['button']);
     await sleep();
-    assert.equal(order.length, 2);
+    assert.equal(order.length, 1);
   } finally { api.resolve({}); f.close(); }
 });
 test('a no-op advanced button does not block the native API when its module becomes ready later', async () => {
@@ -1436,7 +1438,7 @@ test('a no-op advanced button does not block the native API when its module beco
   let nativeCalls = 0;
   Object.assign(f.dom.window, { rcp: { whenReady: () => api.promise } });
   try {
-    autoOpenStats(f, async () => {});
+    updateConfig({ openStatsDelayMs: 0 }); autoOpenStats(f, async () => {});
     f.start(); await sleep();
     document.body.innerHTML = '<button class="postgame-match-history-button">观看进阶记录</button>';
     f.phase('EndOfGame'); await sleep();
@@ -1449,4 +1451,459 @@ test('a no-op advanced button does not block the native API when its module beco
     await sleep();
     assert.equal(nativeCalls, 1);
   } finally { api.resolve({}); f.close(); }
+});
+test('friend status uses colors without game text and restores native colors when disabled', async () => {
+  const states = ['hosting_KIWI', 'inGame', 'inQueue', 'championSelect', 'spectating'];
+  const f = fixture(request => request.endpoint === uri.friends ? json(states.map((state, i) => ({
+    puuid: String(i), gameName: 'Friend' + i, lol: {
+      gameStatus: state, gameQueueType: 'KIWI', timeStamp: String(Date.now() - 65000),
+    },
+  }))) : undefined);
+  try {
+    document.head.insertAdjacentHTML('beforeend', '<style>.status-message{color:red}</style>');
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container">' + states.map((state, i) =>
+      '<div class="lol-social-roster-member" data-puuid="' + i + '">' +
+      '<span class="status-message">原始状态</span></div>').join('') + '</div>';
+    await sleep();
+    const statuses = [...document.querySelectorAll<HTMLElement>('.status-message')];
+    assert.equal(getComputedStyle(statuses[0]).color, 'rgb(54, 217, 135)');
+    assert.equal(getComputedStyle(statuses[1]).color, 'rgb(10, 203, 230)');
+    assert.match(statuses[1].textContent!, /海克斯大乱斗 · 01:[0-9]{2}/);
+    assert.equal(statuses[1].textContent!.includes('游戏中'), false);
+    assert.equal(new Set(statuses.map(status => getComputedStyle(status).color)).size, 5);
+    document.getElementById('aram-lite-friend-status-colors')!.remove();
+    await waitUntil(() => !!document.getElementById('aram-lite-friend-status-colors'));
+    updateConfig({ friendStatus: false });
+    await sleep();
+    assert.equal(document.querySelector('[data-aram-lite-state]'), null);
+    for (const status of statuses) {
+      assert.equal(status.textContent, '原始状态');
+      assert.equal(getComputedStyle(status).color, 'rgb(255, 0, 0)');
+    }
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+test('statistics default to 500 ms after honor and pending opens cancel on phase exit', async () => {
+  const f = fixture();
+  const honor = deferred<void>();
+  const calls: number[] = [];
+  Object.assign(f.dom.window, { rcp: { whenReady: () => Promise.resolve({
+    displayMatchDetails() {
+      calls.push(performance.now());
+      document.body.innerHTML = '<div class="match-details-root match-details-no-header"><div class="match-graph-container"><div class="match-graph-display"></div></div></div>';
+    },
+  }) } });
+  try {
+    assert.equal(config.openStatsDelayMs, 500);
+    controlPanel(f);
+    autoOpenStats(f, () => honor.promise);
+    f.start(); await sleep();
+    const shadow = document.querySelector('#aram-lite-controls')!.shadowRoot!;
+    assert.equal(shadow.querySelector<HTMLInputElement>('[name="openStatsDelayMs"]')!.value, '500');
+    f.phase('EndOfGame'); await sleep(100);
+    assert.equal(calls.length, 0);
+    const released = performance.now();
+    honor.resolve(); await sleep(150);
+    assert.equal(calls.length, 0);
+    await waitUntil(() => calls.length === 1);
+    assert.ok(calls[0] - released >= 480);
+    f.phase('Lobby'); document.body.innerHTML = '';
+    f.phase('EndOfGame'); await sleep(80); f.phase('Lobby'); await sleep(550);
+    assert.equal(calls.length, 1);
+  } finally { honor.resolve(); f.close(); }
+});
+
+test('statistics initialize Data and wait for our avatar before constructing Graph', async () => {
+  const f = fixture();
+  let graphs = 0;
+  Object.assign(f.dom.window, { rcp: { whenReady: () => Promise.resolve({
+    displayMatchDetails(options: { defaultSection: string }) {
+      assert.equal(options.defaultSection, 'stats');
+      document.body.innerHTML = '<div class="match-details-root match-details-no-header">'
+        + '<div class="rcp-fe-lol-match-details-overlay-sub-nav"><button data-name="graph">图表</button></div></div>';
+      document.querySelector('[data-name="graph"]')!.addEventListener('click', () => {
+        graphs++;
+        document.querySelector('.match-details-root')!.insertAdjacentHTML('beforeend',
+          '<div class="match-graph-container"><div class="match-graph-display"></div></div>');
+      });
+    },
+  }) } });
+  try {
+    updateConfig({ openStatsDelayMs: 0, autoReturnLobby: false });
+    autoOpenStats(f, async () => {});
+    f.start(); await sleep(); f.phase('EndOfGame'); await sleep(100);
+    assert.equal(graphs, 0, 'a visible tab is insufficient until the local identity is ready');
+    document.querySelector('.match-details-root')!.insertAdjacentHTML('beforeend',
+      '<div class="team-avatar-wrapper current"></div>');
+    await waitUntil(() => graphs === 1);
+    f.flow.refresh(); await sleep();
+    assert.equal(graphs, 1);
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('immediate return bypasses countdown once and keeps saved delay for the next game', async () => {
+  const f = fixture();
+  try {
+    updateConfig({ returnLobbyDelayMs: 15000 });
+    autoReturnLobby(f); f.start(); await sleep(); f.phase('PreEndOfGame');
+    await waitUntil(() => !!document.querySelector('#aram-lite-return-countdown'));
+    const notice = document.querySelector<HTMLElement>('#aram-lite-return-countdown')!;
+    assert.equal(notice.style.flexDirection, 'column');
+    assert.deepEqual([...notice.querySelectorAll('button')].map(button => button.textContent), ['立即回房', '取消']);
+    const immediate = notice.querySelector<HTMLButtonElement>('[data-action="return"]')!;
+    immediate.click(); immediate.click(); f.flow.refresh();
+    await waitUntil(() => f.writes('/lol-lobby/v2/play-again').length === 1);
+    assert.equal(config.returnLobbyDelayMs, 15000);
+    assert.equal(document.querySelector('#aram-lite-return-countdown'), null);
+    f.phase('EndOfGame'); await sleep();
+    assert.equal(f.writes('/lol-lobby/v2/play-again').length, 1);
+    f.phase('Lobby'); f.phase('PreEndOfGame'); await sleep(100);
+    assert.equal(f.writes('/lol-lobby/v2/play-again').length, 1);
+    assert.match(document.querySelector('#aram-lite-return-countdown')!.textContent!, /15 秒后自动回房/);
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('outOfGame friends with verified party presence display their lobby while idle and malformed parties stay native', async () => {
+  const party = JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5, summonerPuuids: ['a', 'b'] });
+  const cases = [
+    { ptyType: 'open', pty: party },
+    { ptyType: 'closed', pty: party },
+    { ptyType: 'open', pty: '{broken' },
+    { ptyType: '', pty: party },
+    { ptyType: 'open', pty: JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5, summonerPuuids: [] }) },
+    {},
+  ];
+  const f = fixture(request => {
+    if (request.endpoint === uri.friends) return json(cases.map((fields, i) => ({
+      puuid: String(i), gameName: 'Room' + i, availability: 'chat',
+      lol: { gameStatus: 'outOfGame', gameMode: 'KIWI', queueId: '2400', ...fields },
+    })));
+    if (request.endpoint === uri.queues) return json([{ id: 2400, type: 'KIWI', name: '随机单中：大混战' }]);
+  });
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container">' + cases.map((_, i) =>
+      '<div class="lol-social-roster-member" data-puuid="' + i + '"><span class="member-name">Room' + i +
+      '</span><span class="status-message">2/5</span></div>').join('') + '</div>';
+    await sleep();
+    const statuses = [...document.querySelectorAll('.status-message')];
+    for (const status of statuses.slice(0, 2)) {
+      assert.equal(status.textContent, '海克斯大乱斗 · 大厅 · 2/5');
+      assert.equal(status.getAttribute('data-aram-lite-state'), 'lobby');
+    }
+    for (const status of statuses.slice(2)) {
+      assert.equal(status.textContent, '2/5');
+      assert.equal(status.hasAttribute('data-aram-lite-state'), false);
+    }
+    updateConfig({ friendStatus: false }); await sleep();
+    assert.ok(statuses.every(status => status.textContent === '2/5'));
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('native custom-element roster rows enhance open party status and restore it after redraw', async () => {
+  const f = fixture(request => {
+    if (request.endpoint === uri.friends) return json([{
+      id: 'chat-friend-id', gameName: 'CanChickenSwim', availability: 'chat',
+      lol: { gameStatus: 'outOfGame', gameMode: 'KIWI', queueId: '2400', ptyType: 'open',
+        pty: JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5, summonerPuuids: ['a'] }) },
+    }]);
+    if (request.endpoint === uri.queues) return json([{ id: 2400, type: 'KIWI', name: '随机单中：大混战' }]);
+  });
+  const markup = '<div class="lol-social-lower-pane-container"><lol-social-roster-member>'
+    + '<div class="member layout" data-id="chat-friend-id"><div class="member-name">别名</div>'
+    + '<lol-social-status><span class="status-message open-party chat">3/5 随机单中：大混战</span></lol-social-status>'
+    + '</div></lol-social-roster-member></div>';
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = markup; await sleep();
+    assert.equal(document.querySelector('.status-message')!.textContent, '海克斯大乱斗 · 大厅 · 1/5');
+    assert.equal(document.querySelector('.status-message')!.getAttribute('data-aram-lite-state'), 'lobby');
+    document.body.innerHTML = markup; await sleep();
+    assert.equal(document.querySelector('.status-message')!.textContent, '海克斯大乱斗 · 大厅 · 1/5');
+    updateConfig({ friendStatus: false }); await sleep();
+    assert.equal(document.querySelector('.status-message')!.textContent, '3/5 随机单中：大混战');
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('friend lobby occupancy follows party updates and carries the last party size into game', async () => {
+  let count = 2, state = 'hosting_KIWI';
+  const f = fixture(request => request.endpoint === uri.friends ? json([{
+    puuid: 'room', gameName: 'Room', availability: 'chat',
+    lol: { gameStatus: state, gameMode: 'KIWI', pty: JSON.stringify({
+      partyId: 'room', queueId: 2400, maxPlayers: 5, summoners: Array.from({ length: count }, (_, i) => i + 1),
+    }) },
+  }]) : undefined);
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container"><div class="lol-social-roster-member" data-puuid="room">'
+      + '<span class="member-name">Room</span><span class="status-message">原始状态</span></div></div>';
+    await sleep();
+    assert.equal(document.querySelector('.status-message')!.textContent, '海克斯大乱斗 · 大厅 · 2/5');
+    count = 3; f.emit(uri.friends, {});
+    await waitUntil(() => document.querySelector('.status-message')!.textContent === '海克斯大乱斗 · 大厅 · 3/5');
+    state = 'inGame'; f.emit(uri.friends, {});
+    await waitUntil(() => document.querySelector('.status-message')!.textContent === '海克斯大乱斗 · 3/5');
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('friend lobby modes and occupancy support ARAM, solo duo, flex, normals and TFT in open and closed rooms', async () => {
+  const queues = [
+    { id: 450, type: 'ARAM_UNRANKED_5x5', name: '随机单中', expected: '大乱斗', max: 5 },
+    { id: 420, type: 'RANKED_SOLO_5x5', name: '单 / 双排积分', expected: '单双排', max: 2 },
+    { id: 440, type: 'RANKED_FLEX_SR', name: '弹性积分', expected: '灵活排位', max: 5 },
+    { id: 400, type: 'NORMAL', name: '一般对战', expected: '匹配', max: 5 },
+    { id: 1100, type: 'RANKED_TFT', name: '联盟战棋（积分）', expected: '云顶排位', max: 3 },
+    { id: 1160, type: 'RANKED_TFT_DOUBLE_UP', name: '联盟战棋（双人搭档）', expected: '云顶双人', max: 2 },
+  ];
+  const rooms = queues.flatMap(queue => ['hosting', 'open', 'closed'].map(kind => ({ queue, kind })));
+  const f = fixture(request => {
+    if (request.endpoint === uri.queues) return json(queues);
+    if (request.endpoint === uri.friends) return json(rooms.map(({ queue, kind }, i) => ({
+      puuid: String(i), gameName: 'Friend' + i, availability: 'chat',
+      lol: { gameStatus: kind === 'hosting' ? 'hosting_' + queue.type : 'outOfGame',
+        gameQueueType: '', gameMode: queue.type.startsWith('RANKED_TFT') ? 'TFT' : 'CLASSIC',
+        ptyType: kind === 'hosting' ? 'closed' : kind,
+        pty: JSON.stringify({ partyId: 'room' + i, queueId: queue.id, maxPlayers: queue.max, summoners: [1, 2] }) },
+    })));
+  });
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container">' + rooms.map((_, i) =>
+      '<div class="lol-social-roster-member" data-puuid="' + i + '"><span class="member-name">Friend' + i +
+      '</span><span class="status-message">原始状态</span></div>').join('') + '</div>';
+    await sleep();
+    const statuses = [...document.querySelectorAll('.status-message')];
+    rooms.forEach(({ queue }, i) => {
+      assert.equal(statuses[i].textContent, queue.expected + ' · 大厅 · 2/' + queue.max);
+      assert.equal(statuses[i].getAttribute('data-aram-lite-state'), 'lobby');
+    });
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('friend party size carries through queue, selection and game then clears for idle, offline and another match', async () => {
+  let state = 'hosting_KIWI', availability = 'chat', queueId = '2400', gameId = '', count = 3;
+  const f = fixture(request => {
+    if (request.endpoint === uri.friends) return json([{
+      puuid: 'friend', gameName: 'Friend', availability,
+      lol: { gameStatus: state, queueId, gameId, gameMode: 'KIWI', timeStamp: String(Date.now() - 65000),
+        pty: state.startsWith('hosting') ? JSON.stringify({ partyId: 'party', queueId: 2400,
+          maxPlayers: 5, summonerPuuids: Array.from({ length: count }, (_, i) => String(i)) }) : '' },
+    }]);
+    if (request.endpoint === uri.queues) return json([{ id: 2400, type: 'KIWI', name: '随机单中：大混战' },
+      { id: 420, type: 'RANKED_SOLO_5x5', name: '单 / 双排积分' }]);
+  });
+  const text = () => document.querySelector('.status-message')!.textContent!;
+  async function change(next: string) { state = next; f.emit(uri.friends, {}); await sleep(330); }
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container"><div class="lol-social-roster-member" data-puuid="friend">'
+      + '<span class="member-name">Friend</span><span class="status-message">原始状态</span></div></div>';
+    await sleep();
+    assert.equal(text(), '海克斯大乱斗 · 大厅 · 3/5');
+    await change('inQueue'); assert.equal(text(), '海克斯大乱斗 · 排队 · 3/5');
+    await change('championSelect'); assert.equal(text(), '海克斯大乱斗 · 选人 · 3/5');
+    gameId = '111'; await change('inGame'); assert.match(text(), /海克斯大乱斗 · 01:[0-9]{2} · 3[/]5/);
+    gameId = '112'; await change('inGame'); assert.ok(!text().includes('3/5'));
+    await change('hosting_KIWI'); await change('outOfGame'); assert.equal(text(), '原始状态');
+    await change('inQueue'); assert.ok(!text().includes('3/5'));
+    await change('hosting_KIWI'); availability = 'offline'; await change('hosting_KIWI');
+    availability = 'chat'; await change('championSelect'); assert.ok(!text().includes('3/5'));
+    await change('hosting_KIWI'); queueId = '420'; await change('inQueue');
+    assert.equal(text(), '单双排 · 排队中');
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('friend exact queue names stay distinct across common modes in queue, selection and game', async () => {
+  const queues = [
+    { id: 450, type: 'ARAM_UNRANKED_5x5', name: '随机单中', expected: '大乱斗' },
+    { id: 2400, type: 'KIWI', name: '随机单中：大混战', expected: '海克斯大乱斗' },
+    { id: 420, type: 'RANKED_SOLO_5x5', name: '单 / 双排积分', expected: '单双排' },
+    { id: 440, type: 'RANKED_FLEX_SR', name: '弹性积分', expected: '灵活排位' },
+    { id: 400, type: 'NORMAL', name: '一般对战', expected: '匹配' },
+    { id: 490, type: 'NORMAL', name: '快速游戏', expected: '快速游戏' },
+    { id: 1750, type: 'CHERRY', name: '竞技场3x6', expected: '竞技场3x6' },
+    { id: 1700, type: 'CHERRY', name: '竞技场', expected: '竞技场' },
+    { id: 1100, type: 'RANKED_TFT', name: '联盟战棋（积分）', expected: '云顶排位' },
+    { id: 1160, type: 'RANKED_TFT_DOUBLE_UP', name: '联盟战棋（双人搭档）', expected: '云顶双人' },
+    { id: 900, type: 'URF', name: '阿福快打', expected: '阿福快打' },
+  ];
+  let state = 'hosting';
+  const f = fixture(request => {
+    if (request.endpoint === uri.queues) return json(queues);
+    if (request.endpoint === uri.friends) return json(queues.map((queue, i) => ({
+      puuid: String(i), gameName: 'Friend' + i, availability: 'chat',
+      lol: { gameStatus: state === 'hosting' ? 'hosting_' + queue.type : state, gameQueueType: queue.type,
+        queueId: String(queue.id), timeStamp: String(Date.now() - 65000),
+        pty: state === 'hosting' ? JSON.stringify({ partyId: 'party' + i, queueId: queue.id, maxPlayers: 5, summoners: [1, 2] }) : '' },
+    })));
+  });
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container">' + queues.map((_, i) =>
+      '<div class="lol-social-roster-member" data-puuid="' + i + '"><span class="member-name">Friend' + i +
+      '</span><span class="status-message">原始状态</span></div>').join('') + '</div>';
+    await sleep();
+    for (const next of ['hosting', 'inQueue', 'championSelect', 'inGame']) {
+      state = next; f.emit(uri.friends, {}); await sleep(330);
+      const statuses = [...document.querySelectorAll('.status-message')];
+      queues.forEach((queue, i) => {
+        const activity = next === 'hosting' ? '大厅 · 2/5' : next === 'inQueue' ? '排队 · 2/5' : next === 'championSelect' ? '选人 · 2/5' : '01:';
+        assert.ok(statuses[i].textContent!.startsWith(queue.expected + ' · ' + activity), statuses[i].textContent!);
+        if (next === 'inGame') assert.match(statuses[i].textContent!, / · 2[/]5$/);
+      });
+    }
+  } finally { f.close(); }
+});
+
+test('friend current party size takes priority in queue, selection and game with cached fallback', async () => {
+  let state = 'inQueue', count = 2, live = true;
+  const f = fixture(request => request.endpoint === uri.friends ? json([{
+    puuid: 'friend', gameName: 'Friend', availability: 'chat',
+    lol: { gameStatus: state, queueId: '2400', gameMode: 'KIWI',
+      pty: live ? JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5,
+        summoners: Array.from({ length: count }, (_, i) => i + 1) }) : '' },
+  }]) : undefined);
+  const text = () => document.querySelector('.status-message')!.textContent;
+  async function change(next: string) { state = next; f.emit(uri.friends, {}); await sleep(330); }
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container"><div class="lol-social-roster-member" data-puuid="friend">'
+      + '<span class="member-name">Friend</span><span class="status-message">原始状态</span></div></div>';
+    await sleep();
+    assert.equal(text(), '海克斯大乱斗 · 排队 · 2/5');
+    count = 3; await change('championSelect'); assert.equal(text(), '海克斯大乱斗 · 选人 · 3/5');
+    count = 4; await change('inGame'); assert.equal(text(), '海克斯大乱斗 · 4/5');
+    live = false; await change('inGame'); assert.equal(text(), '海克斯大乱斗 · 4/5');
+    count = 2; live = true; await change('inGame'); assert.equal(text(), '海克斯大乱斗 · 2/5');
+    assert.equal(document.querySelector('.status-message')!.getAttribute('data-aram-lite-state'), 'inGame');
+  } finally { f.close(); }
+});
+
+test('statistics bypass Riot click overrides and retry an unready advanced button', async () => {
+  for (const throws of [false, true]) {
+    const f = fixture();
+    let attempts = 0;
+    try {
+      updateConfig({ openStatsDelayMs: 0, autoReturnLobby: false });
+      autoOpenStats(f, async () => {}); f.start(); await sleep();
+      document.body.innerHTML = '<button class="postgame-match-history-button">观看进阶记录</button>';
+      const button = document.querySelector<HTMLButtonElement>('button')!;
+      button.click = () => { if (throws) throw new TypeError('Riot click requires event.button'); };
+      button.onclick = () => {
+        attempts++;
+        if (attempts === 1) return;
+        document.body.insertAdjacentHTML('beforeend', '<div class="match-details-root match-details-no-header">'
+          + '<div class="match-graph-container"><div class="match-graph-display"></div></div></div>');
+      };
+      f.phase('EndOfGame');
+      await sleep(1250);
+      await waitUntil(() => attempts === 2);
+      await sleep();
+      document.querySelector('.match-details-root')!.remove();
+      f.injector.schedule(); await sleep(1100);
+      assert.equal(attempts, 2, 'manual close must not cause another open');
+      assert.equal(f.observers, 1);
+    } finally { f.close(); }
+  }
+});
+
+test('statistics retry a silent native open failure without assuming the request succeeded', async () => {
+  const f = fixture();
+  let calls = 0;
+  Object.assign(f.dom.window, { rcp: { whenReady: () => Promise.resolve({ displayMatchDetails() {
+    calls++;
+    if (calls === 2) document.body.innerHTML = '<div class="match-details-root match-details-no-header">'
+      + '<div class="match-graph-container"><div class="match-graph-display"></div></div></div>';
+  } }) } });
+  try {
+    updateConfig({ openStatsDelayMs: 0, autoReturnLobby: false });
+    autoOpenStats(f, async () => {}); f.start(); await sleep(); f.phase('EndOfGame');
+    await sleep(2200); await waitUntil(() => calls === 2);
+    await sleep(2100); assert.equal(calls, 2);
+  } finally { f.close(); }
+});
+
+test('friend party cache survives page reload and rejects another game, changed mode and expired entries', async () => {
+  let state = 'hosting_KIWI';
+  const f = fixture(request => request.endpoint === uri.friends ? json([{
+    puuid: 'friend', gameName: 'Friend', availability: 'chat',
+    lol: { gameStatus: state, queueId: '2400', gameId: '111', gameMode: 'KIWI',
+      pty: state.startsWith('hosting') ? JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5, summoners: [1, 2] }) : '' },
+  }]) : undefined);
+  const key = 'aram-lite:friend-party-sizes';
+  let saved = '';
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    state = 'inGame'; f.emit(uri.friends, {}); await sleep(330);
+    saved = f.dom.window.sessionStorage.getItem(key)!;
+    assert.ok(saved.includes('2/5'));
+  } finally { f.close(); }
+  const markup = '<div class="lol-social-lower-pane-container"><div class="lol-social-roster-member" data-puuid="friend">'
+    + '<span class="member-name">Friend</span><span class="status-message">原始状态</span></div></div>';
+  for (const variant of ['same', 'another-game', 'another-mode', 'expired', 'malformed']) {
+    const reload = fixture(request => request.endpoint === uri.friends ? json([{
+      puuid: 'friend', gameName: 'Friend', availability: 'dnd',
+      lol: { gameStatus: 'inGame', queueId: variant === 'another-mode' ? '420' : '2400',
+        gameId: variant === 'another-game' ? '112' : '111', gameMode: 'KIWI', pty: '' },
+    }]) : undefined);
+    try {
+      let stored = saved;
+      if (variant === 'expired') {
+        const entries = JSON.parse(saved); entries[0][1].updatedAt = Date.now() - 7 * 60 * 60 * 1000;
+        stored = JSON.stringify(entries);
+      }
+      if (variant === 'malformed') stored = '[null,["friend",{"occupancy":"2/5"}]]';
+      reload.dom.window.sessionStorage.setItem(key, stored);
+      friendEnhancement(reload); reload.start(); await sleep();
+      document.body.innerHTML = markup; await sleep();
+      assert.equal(document.querySelector('.status-message')!.textContent!.includes('2/5'), variant === 'same', variant);
+      assert.equal(reload.observers, 1);
+    } finally { reload.close(); }
+  }
+});
+
+test('single-person friend parties display 1/5 in every phase including cached game presence', async () => {
+  let state = 'hosting_KIWI';
+  const f = fixture(request => request.endpoint === uri.friends ? json([{
+    puuid: 'solo', gameName: 'Solo', availability: 'chat', lol: { gameStatus: state, queueId: '2400', gameMode: 'KIWI',
+      pty: state === 'hosting_KIWI' ? JSON.stringify({ partyId: 'room', queueId: 2400, maxPlayers: 5, summoners: [1] }) : '' },
+  }]) : undefined);
+  try {
+    friendEnhancement(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-social-lower-pane-container"><div class="lol-social-roster-member" data-puuid="solo">'
+      + '<span class="member-name">Solo</span><span class="status-message">原始状态</span></div></div>';
+    await sleep();
+    for (const next of ['hosting_KIWI', 'inQueue', 'championSelect', 'inGame']) {
+      state = next; f.emit(uri.friends, {}); await sleep(330);
+      assert.ok(document.querySelector('.status-message')!.textContent!.includes('1/5'), next);
+    }
+  } finally { f.close(); }
+});
+
+test('long friend mode names use concise aliases and unknown future names never exceed nine characters', () => {
+  const cases = [
+    ['海克斯大乱斗', '海克斯大乱斗'],
+    ['随机单中：大混战锦标赛', '海克斯锦标赛'],
+    ['竞技场（PBE公测服务器 2v2）', '竞技场PBE'],
+    ['召唤峡谷盲选模式自定义', '峡谷盲选自定义'],
+    ['末日机器人 - 维迦的诅咒！', '末日诅咒'],
+    ['末日机器人 - 维迦的邪恶！', '末日邪恶'],
+    ['《联盟战棋》（巴豆龙的经典宝藏）', '云顶宝藏'],
+    ['联盟战棋：超级抽抽乐自订', '云顶狂暴自定义'],
+    ['联盟战棋（教学模式）', '云顶教学'],
+    ['测试：阿福快打 1v1', '阿福1v1测试'],
+    ['未来未知的非常漫长模式名称', '未来未知的非常漫…'],
+  ];
+  for (const [raw, expected] of cases) {
+    assert.equal(compactModeName(raw), expected);
+    assert.ok([...compactModeName(raw)].length <= 9);
+  }
 });
