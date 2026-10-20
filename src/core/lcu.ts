@@ -16,7 +16,8 @@ export class LcuError extends Error {
   }
 }
 export class Lcu {
-  async request<T = void>(method: string, endpoint: string, body?: unknown): Promise<T> {
+  async request<T = void>(method: string, endpoint: string, body?: unknown,
+    onResponse?: (status: number, text: string) => void): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
     try {
@@ -26,8 +27,9 @@ export class Lcu {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!response.ok) throw new LcuError(response.status, method, endpoint);
       const text = await response.text();
+      try { onResponse?.(response.status, text); } catch { /* Observers cannot change request outcomes. */ }
+      if (!response.ok) throw new LcuError(response.status, method, endpoint);
       return (text ? JSON.parse(text) : undefined) as T;
     } finally { clearTimeout(timer); }
   }

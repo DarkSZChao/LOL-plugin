@@ -6,6 +6,7 @@ type ClickHandler = (event: MouseEvent, element: HTMLElement) => void;
 export class Injector {
   private tasks = new Set<Task>();
   private clicks = new Map<string, ClickHandler>();
+  private pointerDowns = new Map<string, ClickHandler>();
   private observer?: MutationObserver;
   private frame: number | null = null;
   private tick?: ReturnType<typeof setInterval>;
@@ -18,17 +19,24 @@ export class Injector {
     this.clicks.set(selector, handler);
     return () => { this.clicks.delete(selector); };
   }
+  onPointerDown(selector: string, handler: ClickHandler): Cleanup {
+    this.pointerDowns.set(selector, handler);
+    return () => { this.pointerDowns.delete(selector); };
+  }
   private handleClick = (event: MouseEvent): void => {
-    const target = event.composedPath().find(node => node instanceof Element) as Element | undefined;
-    if (!target) return;
-    for (const [selector, handler] of this.clicks) {
-      const element = target.closest<HTMLElement>(selector);
+    this.dispatch(event, this.clicks);
+  };
+  private handlePointerDown = (event: MouseEvent): void => { this.dispatch(event, this.pointerDowns); };
+  private dispatch(event: MouseEvent, handlers: Map<string, ClickHandler>): void {
+    const path = event.composedPath().filter((node): node is Element => node instanceof Element);
+    for (const [selector, handler] of handlers) {
+      const element = path.map(node => node.closest<HTMLElement>(selector)).find(Boolean);
       if (element) {
         try { handler(event, element); } catch (error) { report('点击处理', error); }
         if (event.cancelBubble) break;
       }
     }
-  };
+  }
   schedule = (): void => {
     if (!this.observer || this.frame !== null) return;
     this.frame = requestAnimationFrame(() => {
@@ -47,6 +55,7 @@ export class Injector {
     });
     // One delegated handler survives replaced/cloned client nodes.
     document.addEventListener('click', this.handleClick, true);
+    document.addEventListener('pointerdown', this.handlePointerDown, true);
     this.tick = setInterval(this.schedule, 1000);
     this.schedule();
   }
@@ -57,8 +66,10 @@ export class Injector {
     this.frame = null;
     clearInterval(this.tick);
     document.removeEventListener('click', this.handleClick, true);
+    document.removeEventListener('pointerdown', this.handlePointerDown, true);
     this.tasks.clear();
     this.clicks.clear();
+    this.pointerDowns.clear();
   }
 }
 export function stopClick(event: Event): void {

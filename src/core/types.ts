@@ -1,6 +1,8 @@
 export interface PenguContext {
   socket: { observe(uri: string, callback: (event: LcuEvent) => void): void };
+  fs?: PluginFS;
 }
+export interface PluginFS { write(path: string, content: string): Promise<boolean> }
 export interface LcuEvent {
   uri: string;
   eventType: 'Create' | 'Update' | 'Delete';
@@ -16,6 +18,8 @@ export interface ChampSession {
   benchEnabled?: boolean;
   benchChampions?: Array<{ championId: number }>;
   localPlayerCellId: number;
+  timer?: { phase?: string; inBanPickPhase?: boolean; inFinalizationPhase?: boolean };
+  actions?: Array<Array<{ id: number; type: string; actorCellId: number; completed: boolean; championId?: number }>>;
   myTeam: Array<{ championId?: number; cellId: number; spell1Id: number; spell2Id: number }>;
 }
 export interface LobbyMember { puuid?: string; summonerId?: number }

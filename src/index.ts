@@ -14,6 +14,7 @@ import { autoHonor } from './features/auto-honor';
 import { friendEnhancement } from './features/friend-enhancement';
 import { quickLobby } from './features/quick-lobby';
 import { controlPanel } from './features/control-panel';
+import { benchLog } from './core/bench-log';
 
 class Plugin {
   readonly lcu = new Lcu();
@@ -59,6 +60,9 @@ declare global {
 function runtime(): Plugin {
   return window.__PENGU_ARAM_LITE__ ??= new Plugin();
 }
-export function init(context: PenguContext): void { runtime().events.bind(context); }
+export function init(context: PenguContext): void {
+  benchLog.bind(context.fs);
+  runtime().events.bind(context);
+}
 export function load(): void { runtime().start(); }
 export function unload(): void { runtime().stop(); }

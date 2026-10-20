@@ -5,6 +5,7 @@ import { Lcu, LcuError, uri } from '../../src/core/lcu';
 import { Events, Scope } from '../../src/core/events';
 import { Gameflow } from '../../src/core/gameflow';
 import { Injector } from '../../src/core/injector';
+import { BenchLog } from '../../src/core/bench-log';
 import { championSpells, config, loadConfig, normalizeConfig, onConfigChange, resetConfig, updateConfig } from '../../src/core/config';
 import { controlPanel } from '../../src/features/control-panel';
 import type { FeatureContext } from '../../src/core/context';
@@ -237,7 +238,7 @@ test('Play only intercepts None, suppresses double click, and survives DOM repla
   } finally { f.close(); }
 });
 
-test('Bench delegates recycled nodes, restores cooldown DOM, and rejects locked slots', async () => {
+test('Bench delegates recycled nodes, restores cooldown DOM, and preserves native locked slots', async () => {
   const f = fixture();
   try {
     aramBenchNoCooldown(f); f.start(); f.injector.start(); await sleep();
@@ -1906,4 +1907,134 @@ test('long friend mode names use concise aliases and unknown future names never 
     assert.equal(compactModeName(raw), expected);
     assert.ok([...compactModeName(raw)].length <= 9);
   }
+});
+
+test('Bench preserves phase locks and only requests eligible nonempty bench champions without automatic retries', async () => {
+  const f = fixture(request => request.endpoint.includes('/bench/swap/') ? json({}, 409) : undefined);
+  try {
+    aramBenchNoCooldown(f); f.start(); await sleep(); f.phase('ChampSelect'); await sleep();
+    document.body.innerHTML = '<div class="bench-container"><div class="champion-bench-item locked-out waiting-on-finalization">'
+      + '<div class="bench-champion-background" style="background-image:url(/lol-game-data/assets/v1/champion-icons/1.png)"></div></div></div>';
+    await sleep();
+    const item = document.querySelector<HTMLElement>('.champion-bench-item')!;
+    item.click(); await sleep();
+    assert.equal(f.writes().length, 0);
+    item.classList.remove('locked-out'); item.click(); await sleep();
+    assert.equal(f.writes().length, 0);
+    item.classList.remove('waiting-on-finalization');
+    item.click(); item.click(); await sleep();
+    assert.equal(f.writes(uri.champ + '/bench/swap/1').length, 1);
+    f.emit(uri.champ, f.session()); await sleep(100);
+    assert.equal(f.writes(uri.champ + '/bench/swap/1').length, 1);
+    item.classList.add('empty-bench-item'); item.click(); await sleep();
+    item.classList.remove('empty-bench-item');
+    item.querySelector<HTMLElement>('.bench-champion-background')!.style.backgroundImage = 'url(/lol-game-data/assets/v1/champion-icons/999.png)';
+    item.click(); await sleep();
+    assert.equal(f.writes().length, 1);
+    item.querySelector<HTMLElement>('.bench-champion-background')!.style.backgroundImage = 'url(/lol-game-data/assets/v1/champion-icons/1.png)';
+    updateConfig({ benchNoCooldown: false }); item.click(); await sleep();
+    assert.equal(f.writes().length, 1);
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('Bench retains native grayscale and waiting masks even when cooldown bypass is enabled', async () => {
+  const f = fixture();
+  try {
+    const nativeStyle = document.createElement('style');
+    nativeStyle.textContent = '.champion-bench-item.locked-out{filter:grayscale(1);cursor:not-allowed;pointer-events:none}';
+    document.head.append(nativeStyle);
+    aramBenchNoCooldown(f); f.start(); await sleep(); f.phase('ChampSelect'); await sleep();
+    document.body.innerHTML = '<div class="bench-container">' + [1, 999].map(id =>
+      '<div class="champion-bench-item locked-out waiting-on-finalization"><div class="bench-champion-background" '
+      + 'style="background-image:url(/lol-game-data/assets/v1/champion-icons/' + id + '.png)"></div></div>').join('') + '</div>';
+    await sleep();
+    const items = [...document.querySelectorAll<HTMLElement>('.champion-bench-item')];
+    assert.equal(items[0].hasAttribute('data-aram-lite-bench-swap'), false);
+    assert.equal(items[1].hasAttribute('data-aram-lite-bench-swap'), false);
+    assert.equal(getComputedStyle(items[0]).filter, 'grayscale(1)');
+    assert.equal(getComputedStyle(items[0]).pointerEvents, 'none');
+    assert.equal(getComputedStyle(items[1]).filter, 'grayscale(1)');
+    items[0].click(); await sleep();
+    assert.equal(f.writes(uri.champ + '/bench/swap/1').length, 0);
+    updateConfig({ benchNoCooldown: false }); await sleep();
+    assert.equal(items[0].hasAttribute('data-aram-lite-bench-swap'), false);
+    assert.equal(getComputedStyle(items[0]).filter, 'grayscale(1)');
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('Bench success is checked against the local champion and unchanged responses remain in the log', async () => {
+  for (const changes of [false, true]) {
+    let sent = false, checks = 0;
+    const notices: string[] = [];
+    const previousToast = (globalThis as typeof globalThis & { Toast?: unknown }).Toast;
+    const f = fixture(request => {
+      if (request.endpoint.includes('/bench/swap/')) { sent = true; return new Response(null, { status: 204 }); }
+      if (request.endpoint === uri.champ && sent) {
+        checks++;
+        return json({ ...f.session(), myTeam: [{ cellId: 0, championId: changes ? 1 : 2, spell1Id: 4, spell2Id: 32 }] });
+      }
+    });
+    Object.assign(globalThis, { Toast: { error: (message: string) => notices.push(message) } });
+    try {
+      aramBenchNoCooldown(f); f.start(); await sleep(); f.phase('ChampSelect'); await sleep();
+      document.body.innerHTML = '<div class="bench-container"><div class="champion-bench-item">'
+        + '<div class="bench-champion-background" style="background-image:url(/lol-game-data/assets/v1/champion-icons/1.png)"></div></div></div>';
+      await sleep(); document.querySelector<HTMLElement>('.champion-bench-item')!.click();
+      if (changes) { await waitUntil(() => checks === 1); await sleep(); assert.equal(notices.length, 0); }
+      else { await waitUntil(() => checks === 3); await sleep(); assert.equal(notices.length, 0);
+        const entries = f.storage.get('aram-lite:bench-log') as Array<{ event: string; data: { gameId?: number } }>;
+        assert.ok(entries.some(entry => entry.event === 'unconfirmed' && entry.data.gameId === f.gameId)); }
+      assert.equal(f.writes().length, 1);
+    } finally { f.close(); Object.assign(globalThis, { Toast: previousToast }); }
+  }
+});
+
+test('Bench records pointerdown across shadow DOM and click rejection without another connection or observer', async () => {
+  const f = fixture(request => request.endpoint.includes('/bench/swap/') ? json({ message: 'not allowed in this phase' }, 409) : undefined);
+  try {
+    aramBenchNoCooldown(f); f.start(); await sleep(); f.phase('ChampSelect'); await sleep();
+    document.body.innerHTML = '<div class="bench-container"><div class="champion-bench-item">'
+      + '<div class="bench-champion-background" style="background-image:url(/lol-game-data/assets/v1/champion-icons/1.png)"></div>'
+      + '<test-bench-icon></test-bench-icon></div></div>';
+    const icon = document.querySelector('test-bench-icon')!;
+    const shadow = icon.attachShadow({ mode: 'open' }); shadow.innerHTML = '<span>Icon</span>';
+    const target = shadow.querySelector('span')!;
+    target.dispatchEvent(new f.dom.window.MouseEvent('pointerdown', { bubbles: true, composed: true }));
+    target.dispatchEvent(new f.dom.window.MouseEvent('click', { bubbles: true, composed: true }));
+    await sleep();
+    const entries = f.storage.get('aram-lite:bench-log') as Array<{ event: string; data: Record<string, unknown> }>;
+    const recent = entries.filter(entry => entry.data.gameId === f.gameId);
+    assert.ok(recent.some(entry => entry.event === 'pointerdown'));
+    const click = recent.find(entry => entry.event === 'click')!;
+    assert.ok(click);
+    const requestEntry = [...entries].reverse().find(entry => entry.event === 'request' && entry.data.gameId === f.gameId)!;
+    const requestIndex = entries.indexOf(requestEntry);
+    const response = entries.slice(requestIndex).find(entry => entry.event === 'response')!;
+    assert.equal(response.data.status, 409);
+    assert.match(String(response.data.body), /not allowed/);
+    assert.equal(f.writes().length, 1);
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('Bench file logging preserves write order, survives backup failure and remains bounded', async () => {
+  const f = fixture();
+  const writes: string[] = [];
+  try {
+    Object.assign(globalThis, { DataStore: { get: () => undefined, set: () => { throw new Error('backup unavailable'); } } });
+    const log = new BenchLog();
+    log.bind({ write: async (path, content) => { assert.match(path, /^bench-log-.*\.json$/); writes.push(content); return true; } });
+    log.record('click', { targetChampion: 1 }); log.record('response', { status: 409 });
+    await log.flush();
+    assert.deepEqual(JSON.parse(writes.at(-1)!).entries.map((entry: { event: string }) => entry.event), ['logger-ready', 'click', 'response']);
+    const bounded = new BenchLog();
+    for (let i = 0; i < 510; i++) bounded.record('event', { i });
+    let content = '';
+    bounded.bind({ write: async (_path, text) => { content = text; return true; } });
+    await bounded.flush();
+    assert.equal(JSON.parse(content).entries.length, 500);
+    assert.equal(f.writes().length, 0);
+  } finally { f.close(); }
 });

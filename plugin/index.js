@@ -153,7 +153,7 @@ var LcuError = class extends Error {
   }
 };
 var Lcu = class {
-  async request(method, endpoint, body) {
+  async request(method, endpoint, body, onResponse) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8e3);
     try {
@@ -163,8 +163,12 @@ var Lcu = class {
         body: body === void 0 ? void 0 : JSON.stringify(body),
         signal: controller.signal
       });
-      if (!response.ok) throw new LcuError(response.status, method, endpoint);
       const text = await response.text();
+      try {
+        onResponse?.(response.status, text);
+      } catch {
+      }
+      if (!response.ok) throw new LcuError(response.status, method, endpoint);
       return text ? JSON.parse(text) : void 0;
     } finally {
       clearTimeout(timer);
@@ -427,21 +431,13 @@ var Injector = class {
   constructor() {
     this.tasks = /* @__PURE__ */ new Set();
     this.clicks = /* @__PURE__ */ new Map();
+    this.pointerDowns = /* @__PURE__ */ new Map();
     this.frame = null;
     this.handleClick = (event) => {
-      const target = event.composedPath().find((node) => node instanceof Element);
-      if (!target) return;
-      for (const [selector, handler] of this.clicks) {
-        const element = target.closest(selector);
-        if (element) {
-          try {
-            handler(event, element);
-          } catch (error) {
-            report("\u70B9\u51FB\u5904\u7406", error);
-          }
-          if (event.cancelBubble) break;
-        }
-      }
+      this.dispatch(event, this.clicks);
+    };
+    this.handlePointerDown = (event) => {
+      this.dispatch(event, this.pointerDowns);
     };
     this.schedule = () => {
       if (!this.observer || this.frame !== null) return;
@@ -470,6 +466,26 @@ var Injector = class {
       this.clicks.delete(selector);
     };
   }
+  onPointerDown(selector, handler) {
+    this.pointerDowns.set(selector, handler);
+    return () => {
+      this.pointerDowns.delete(selector);
+    };
+  }
+  dispatch(event, handlers) {
+    const path = event.composedPath().filter((node) => node instanceof Element);
+    for (const [selector, handler] of handlers) {
+      const element = path.map((node) => node.closest(selector)).find(Boolean);
+      if (element) {
+        try {
+          handler(event, element);
+        } catch (error) {
+          report("\u70B9\u51FB\u5904\u7406", error);
+        }
+        if (event.cancelBubble) break;
+      }
+    }
+  }
   start() {
     if (this.observer) return;
     this.observer = new MutationObserver(this.schedule);
@@ -481,6 +497,7 @@ var Injector = class {
       attributeFilter: ["class", "style", "disabled", "aria-disabled", "data-puuid"]
     });
     document.addEventListener("click", this.handleClick, true);
+    document.addEventListener("pointerdown", this.handlePointerDown, true);
     this.tick = setInterval(this.schedule, 1e3);
     this.schedule();
   }
@@ -491,8 +508,10 @@ var Injector = class {
     this.frame = null;
     clearInterval(this.tick);
     document.removeEventListener("click", this.handleClick, true);
+    document.removeEventListener("pointerdown", this.handlePointerDown, true);
     this.tasks.clear();
     this.clicks.clear();
+    this.pointerDowns.clear();
   }
 };
 function stopClick(event) {
@@ -539,11 +558,113 @@ function autoAccept({ flow, lcu, scope }) {
   }));
 }
 
+// src/core/bench-log.ts
+var BenchLog = class {
+  constructor() {
+    this.entries = [];
+    this.pending = Promise.resolve();
+    this.file = "bench-log-" + (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(16).slice(2, 8) + ".json";
+    this.key = "aram-lite:bench-log";
+  }
+  get store() {
+    return globalThis.DataStore;
+  }
+  bind(fs) {
+    if (this.fs === fs && this.entries.length) return;
+    this.fs = fs;
+    if (!this.entries.length) {
+      try {
+        const saved = this.store?.get(this.key);
+        if (Array.isArray(saved)) this.entries = saved.slice(-500);
+      } catch {
+      }
+    }
+    this.record("logger-ready", { file: this.file, fileSystemAvailable: !!fs });
+  }
+  record(event, data) {
+    try {
+      this.entries.push({ at: (/* @__PURE__ */ new Date()).toISOString(), event, data });
+      if (this.entries.length > 500) this.entries.splice(0, this.entries.length - 500);
+      try {
+        this.store?.set(this.key, this.entries.slice());
+      } catch {
+      }
+      if (this.fs) {
+        const fs = this.fs;
+        const content = JSON.stringify({ version: 1, entries: this.entries }, null, 2);
+        this.pending = this.pending.then(async () => {
+          if (!await fs.write(this.file, content)) throw new Error("PluginFS.write returned false");
+        }).catch((error) => {
+          console.warn("[ARAM Lite] Bench log write failed:", String(error));
+        });
+      }
+    } catch (error) {
+      console.warn("[ARAM Lite] Bench log failed:", String(error));
+    }
+  }
+  flush() {
+    return this.pending;
+  }
+};
+var benchLog = new BenchLog();
+
 // src/features/aram-bench-no-cooldown.ts
 var marker = "data-aram-lite-bench";
 var styleId = "aram-lite-bench-style";
 function aramBenchNoCooldown({ flow, injector, lcu, scope }) {
   let busy = false;
+  let requestOwner = 0;
+  let attempts = 0;
+  const snapshot = (session = flow.champ) => ({
+    phase: flow.phase,
+    selectionEpoch: flow.selectionEpoch,
+    isAram: flow.isAram,
+    enabled: config.benchNoCooldown,
+    busy,
+    gameId: session?.gameId ?? flow.game?.gameData?.gameId,
+    queueId: session?.queueId ?? flow.game?.gameData?.queue?.id,
+    benchEnabled: session?.benchEnabled,
+    timer: session?.timer && {
+      phase: session.timer.phase,
+      inBanPickPhase: session.timer.inBanPickPhase,
+      inFinalizationPhase: session.timer.inFinalizationPhase
+    },
+    localChampion: session?.myTeam?.find((player) => player.cellId === session.localPlayerCellId)?.championId,
+    bench: session?.benchChampions?.map((champion) => champion.championId),
+    team: session?.myTeam?.map((player) => ({ cell: player.cellId, champion: player.championId })),
+    actions: session?.actions?.flat().map((action) => ({
+      id: action.id,
+      type: action.type,
+      cell: action.actorCellId,
+      completed: action.completed,
+      champion: action.championId
+    }))
+  });
+  let previousState = "";
+  scope.own(flow.onChange(() => {
+    if (flow.phase !== "ChampSelect" && !previousState) return;
+    const state = snapshot();
+    const encoded = JSON.stringify(state);
+    if (encoded !== previousState) benchLog.record("selection-state", state);
+    previousState = flow.phase === "ChampSelect" ? encoded : "";
+  }));
+  const championId = (item) => {
+    const icon = item.querySelector(".bench-champion-background");
+    const background = icon && (icon.style.backgroundImage || getComputedStyle(icon).backgroundImage);
+    const match = background?.match(/champion-icons\/(\d+)\.png/);
+    return match ? Number(match[1]) : 0;
+  };
+  const isOnBench = (id3) => id3 > 0 && !!flow.champ?.benchChampions?.some((champion) => champion.championId === id3);
+  scope.own(injector.onPointerDown(".bench-container", (event, container) => {
+    const item = event.composedPath().filter((node) => node instanceof Element).map((node) => node.closest(".champion-bench-item")).find(Boolean);
+    benchLog.record("pointerdown", {
+      ...snapshot(),
+      button: event.button,
+      targetChampion: item ? championId(item) : null,
+      itemClasses: item?.className,
+      containerClasses: container.className
+    });
+  }));
   const removed = /* @__PURE__ */ new Map();
   const restore2 = () => {
     for (const [element, classes] of removed) {
@@ -579,18 +700,64 @@ function aramBenchNoCooldown({ flow, injector, lcu, scope }) {
     });
   }));
   scope.own(injector.onClick(".bench-container .champion-bench-item", (event, item) => {
-    if (!config.benchNoCooldown || !flow.isAram || !flow.champ?.benchEnabled) return;
-    if (item.classList.contains("empty-bench-item") || item.classList.contains("locked-out")) return;
-    const icon = item.querySelector(".bench-champion-background");
-    const background = icon && (icon.style.backgroundImage || getComputedStyle(icon).backgroundImage);
-    const match = background?.match(/champion-icons\/(\d+)\.png/);
-    const id3 = match ? Number(match[1]) : 0;
-    if (!id3 || !flow.champ.benchChampions?.some((champion) => champion.championId === id3)) return;
+    const attempt = ++attempts;
+    benchLog.record("click", { attempt, ...snapshot(), targetChampion: championId(item), itemClasses: item.className, trusted: event.isTrusted });
+    if (!config.benchNoCooldown || !flow.isAram || !flow.champ?.benchEnabled) {
+      benchLog.record("ignored", { attempt, reason: "feature-or-session-not-ready", ...snapshot() });
+      return;
+    }
+    if (item.classList.contains("empty-bench-item")) {
+      benchLog.record("ignored", { attempt, reason: "empty-slot" });
+      return;
+    }
+    if (item.classList.contains("locked-out") || item.classList.contains("waiting-on-finalization")) {
+      benchLog.record("ignored", { attempt, reason: "native-eligibility-or-phase-lock" });
+      return;
+    }
+    const id3 = championId(item);
+    if (!isOnBench(id3)) {
+      benchLog.record("ignored", { attempt, reason: id3 ? "not-in-bench" : "champion-icon-unrecognized", targetChampion: id3 });
+      return;
+    }
     stopClick(event);
-    if (busy) return;
+    if (busy) {
+      benchLog.record("ignored", { attempt, reason: "request-in-progress" });
+      return;
+    }
     busy = true;
-    void lcu.post(uri.champ + "/bench/swap/" + id3).catch((error) => report("Bench \u6362\u82F1\u96C4", error, true)).finally(() => {
-      busy = false;
+    requestOwner = attempt;
+    const epoch = flow.selectionEpoch;
+    const current = () => scope.active && flow.isAram && flow.selectionEpoch === epoch;
+    console.info("[ARAM Lite] Bench POST id=" + id3);
+    const endpoint = uri.champ + "/bench/swap/" + id3;
+    benchLog.record("request", { attempt, method: "POST", endpoint, ...snapshot() });
+    void lcu.request("POST", endpoint, void 0, (status, body) => {
+      benchLog.record("response", { attempt, status, body: body.slice(0, 2048) });
+    }).then(async () => {
+      if (requestOwner === attempt) busy = false;
+      if (!current()) {
+        benchLog.record("verification-stopped", { attempt, reason: "selection-ended" });
+        return;
+      }
+      for (let check = 0; check < 3 && current(); check++) {
+        const session = await lcu.get(uri.champ);
+        benchLog.record("verification", { attempt, check: check + 1, ...snapshot(session) });
+        if (!current()) return;
+        if (session?.myTeam?.find((player) => player.cellId === session.localPlayerCellId)?.championId === id3) {
+          console.info("[ARAM Lite] Bench confirmed id=" + id3);
+          benchLog.record("confirmed", { attempt, targetChampion: id3, ...snapshot(session) });
+          return;
+        }
+        if (check < 2 && !await scope.delay(500)) return;
+      }
+      if (current()) {
+        benchLog.record("unconfirmed", { attempt, targetChampion: id3, ...snapshot() });
+      }
+    }).catch((error) => {
+      benchLog.record("error", { attempt, message: String(error) });
+      report("Bench \u6362\u82F1\u96C4", error, true);
+    }).finally(() => {
+      if (requestOwner === attempt) busy = false;
     });
   }));
   scope.own(() => {
@@ -1601,6 +1768,7 @@ function runtime() {
   return window.__PENGU_ARAM_LITE__ ??= new Plugin();
 }
 function init(context) {
+  benchLog.bind(context.fs);
   runtime().events.bind(context);
 }
 function load() {
