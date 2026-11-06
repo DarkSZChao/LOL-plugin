@@ -921,8 +921,90 @@ function champSelectQuit({ flow, injector, lcu, scope }) {
   scope.own(() => document.getElementById(id)?.remove());
 }
 
+// src/features/auto-dismiss-rewards.ts
+var confirmations = /* @__PURE__ */ new Set([
+  "\u786E\u5B9A",
+  "\u78BA\u5B9A",
+  "\u786E\u8BA4",
+  "\u78BA\u8A8D",
+  "\u7EE7\u7EED",
+  "\u7E7C\u7E8C",
+  "\u5B8C\u6210",
+  "\u77E5\u9053\u4E86",
+  "\u597D\u7684",
+  "\u9886\u53D6",
+  "\u9818\u53D6",
+  "\u6536\u4E0B",
+  "ok",
+  "okay",
+  "continue",
+  "done",
+  "got it",
+  "claim",
+  "collect"
+]);
+function autoDismissRewards({ flow, injector, scope }) {
+  let endedAt = null;
+  let nextClickAt = 0;
+  let seen = /* @__PURE__ */ new WeakMap();
+  let wasEnding = false;
+  const ending = () => flow.phase === "PreEndOfGame" || flow.phase === "EndOfGame";
+  scope.own(flow.onChange(() => {
+    const isEnding = ending();
+    if (isEnding && !wasEnding) {
+      seen = /* @__PURE__ */ new WeakMap();
+      nextClickAt = 0;
+    }
+    if (isEnding) endedAt = Date.now();
+    wasEnding = isEnding;
+  }));
+  const visible = (element) => {
+    if (!element.isConnected) return false;
+    for (let node = element; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (node.hidden || node.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+    }
+    return true;
+  };
+  scope.own(injector.register(() => {
+    const now = Date.now();
+    if (!config.autoOpenStats || now < nextClickAt) return;
+    if (!ending() && !(endedAt !== null && now - endedAt < 3e4 && (flow.phase === "Lobby" || flow.phase === "None"))) return;
+    for (const root of document.querySelectorAll(
+      ".lol-uikit-vignette-celebration-layer, .dialog-celebration-container"
+    )) {
+      if (!visible(root)) continue;
+      for (const button of root.querySelectorAll(".footer-button, .dialog-celebration-ok-button")) {
+        if (!visible(button) || button.hasAttribute("disabled") || button.getAttribute("aria-disabled") === "true" || button.classList.contains("disabled") || getComputedStyle(button).pointerEvents === "none") continue;
+        const label = button.textContent?.replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+        if (!confirmations.has(label)) continue;
+        const signature = label + "|" + root.textContent?.replace(/\s+/g, " ").trim().slice(0, 500);
+        let previous = seen.get(button);
+        if (!previous || previous.signature !== signature) {
+          previous = { signature, attempts: 0, at: now };
+          seen.set(button, previous);
+          scope.later(injector.schedule, 400);
+          continue;
+        }
+        if (previous.attempts >= 5 || now - previous.at < (previous.attempts ? 1e3 : 400)) continue;
+        previous.attempts++;
+        previous.at = now;
+        nextClickAt = now + 400;
+        try {
+          button.ownerDocument.defaultView.HTMLElement.prototype.click.call(button);
+        } catch (error) {
+          report("\u81EA\u52A8\u8DF3\u8FC7\u5956\u52B1", error);
+        }
+        return;
+      }
+    }
+  }));
+}
+
 // src/features/auto-open-stats.ts
-function autoOpenStats({ flow, injector, scope }, waitForHonor) {
+function autoOpenStats(context, waitForHonor) {
+  const { flow, injector, scope } = context;
+  autoDismissRewards(context);
   let nativeApi;
   const rcp = window.rcp;
   if (rcp?.whenReady) {
@@ -1285,6 +1367,8 @@ var original = "data-aram-lite-original";
 var rendered = "data-aram-lite-rendered";
 var groupAttr = "data-aram-lite-group";
 var stateAttr = "data-aram-lite-state";
+var groupLabel = "data-aram-lite-group-label";
+var savedTitle = "data-aram-lite-original-title";
 function friendIndex(friends) {
   const index = /* @__PURE__ */ new Map();
   for (const friend of friends) {
@@ -1409,6 +1493,12 @@ function restore(element) {
   element.removeAttribute(stateAttr);
   element.removeAttribute(original);
   element.removeAttribute(rendered);
+  if (element.hasAttribute(savedTitle)) {
+    const title = element.getAttribute(savedTitle);
+    if (title) element.setAttribute("title", title);
+    else element.removeAttribute("title");
+    element.removeAttribute(savedTitle);
+  }
 }
 function friendEnhancement({ events, injector, lcu, scope }) {
   const style = document.createElement("style");
@@ -1424,7 +1514,7 @@ function friendEnhancement({ events, injector, lcu, scope }) {
     teamSelect: "#63c28c",
     tutorial: "#e8c85a"
   };
-  style.textContent = Object.entries(colors).map(([state, color]) => "[" + stateAttr + '="' + state + '"]{color:' + color + "!important}").join("");
+  style.textContent = Object.entries(colors).map(([state, color]) => "[" + stateAttr + '="' + state + '"]{color:' + color + "!important}").join("") + "[" + groupLabel + "]{position:relative;box-sizing:border-box;padding-right:42px}[" + groupLabel + "]::after{content:attr(" + groupLabel + ");position:absolute;right:0;top:0;font-size:12px;color:#0acbe6;letter-spacing:0;pointer-events:none}";
   scope.own(() => style.remove());
   let index = /* @__PURE__ */ new Map();
   let groups = /* @__PURE__ */ new Map();
@@ -1565,7 +1655,7 @@ function friendEnhancement({ events, injector, lcu, scope }) {
   void refresh();
   loadQueues();
   scope.own(injector.register(() => {
-    if (config.friendStatus) {
+    if (enabled()) {
       if (!style.isConnected) document.head?.append(style);
     } else style.remove();
     const members = document.querySelectorAll(
@@ -1574,19 +1664,25 @@ function friendEnhancement({ events, injector, lcu, scope }) {
     for (const member of members) {
       const status = member.querySelector("span.status-message");
       if (!status) continue;
-      const name = member.querySelector(".member-name")?.textContent?.trim();
+      const nameElement = member.querySelector(".member-name");
+      const name = nameElement?.textContent?.trim();
       const key = member.getAttribute("data-puuid") || member.querySelector(".member[data-id]")?.getAttribute("data-id") || name;
       const matches = key ? index.get(key) : void 0;
       const friend = matches?.length === 1 ? matches[0] : void 0;
       if (!enabled() || !friend || member.classList.contains("offline") || friend.availability === "offline") {
         restore(status);
         member.removeAttribute(groupAttr);
+        nameElement?.removeAttribute(groupLabel);
         continue;
       }
       const lol = friend.lol;
       const remembered = partySizes.get(friendKey(friend) ?? "");
       const detail = config.friendStatus ? statusText(friend, queueNames, queueTypes, remembered) : null;
       const group = config.friendGroups && lol?.gameStatus === "inGame" ? groups.get(lol.gameId || "") : void 0;
+      const label = group ? "\u540C\u5C40" + group : null;
+      if (label && nameElement) {
+        if (nameElement.getAttribute(groupLabel) !== label) nameElement.setAttribute(groupLabel, label);
+      } else nameElement?.removeAttribute(groupLabel);
       if (!detail && !group) {
         restore(status);
         member.removeAttribute(groupAttr);
@@ -1601,9 +1697,11 @@ function friendEnhancement({ events, injector, lcu, scope }) {
         status.setAttribute(original, status.textContent ?? "");
       }
       const base = detail ?? status.getAttribute(original) ?? "";
-      const text = base + (group ? " \xB7 \u540C\u5C40" + group : "");
+      const text = base;
       if (status.getAttribute(rendered) !== text) status.setAttribute(rendered, text);
       if (status.textContent !== text) status.textContent = text;
+      if (!status.hasAttribute(savedTitle)) status.setAttribute(savedTitle, status.getAttribute("title") ?? "");
+      if (status.getAttribute("title") !== text) status.setAttribute("title", text);
       if (group) {
         if (member.getAttribute(groupAttr) !== lol.gameId) member.setAttribute(groupAttr, lol.gameId);
       } else member.removeAttribute(groupAttr);
@@ -1612,6 +1710,7 @@ function friendEnhancement({ events, injector, lcu, scope }) {
   scope.own(() => {
     document.querySelectorAll("[" + rendered + "]").forEach(restore);
     document.querySelectorAll("[" + groupAttr + "]").forEach((member) => member.removeAttribute(groupAttr));
+    document.querySelectorAll("[" + groupLabel + "]").forEach((name) => name.removeAttribute(groupLabel));
   });
 }
 

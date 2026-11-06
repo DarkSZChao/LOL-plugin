@@ -16,6 +16,7 @@ import { aramBenchNoCooldown } from '../../src/features/aram-bench-no-cooldown';
 import { champSelectQuit } from '../../src/features/champselect-quit';
 import { quickLobby } from '../../src/features/quick-lobby';
 import { autoHonor } from '../../src/features/auto-honor';
+import { autoDismissRewards } from '../../src/features/auto-dismiss-rewards';
 import { autoOpenStats } from '../../src/features/auto-open-stats';
 import { autoReturnLobby } from '../../src/features/auto-return-lobby';
 import { friendEnhancement, formatDuration, compactModeName } from '../../src/features/friend-enhancement';
@@ -372,7 +373,7 @@ test('friend modes, elapsed time and same-game labels self-heal and restore nati
   try {
     friendEnhancement(f); f.start(); await sleep();
     document.body.innerHTML = markup; await sleep();
-    assert.match(document.querySelector('.status-message')!.textContent!, /大乱斗 · 01:\d{2} · 同局1/);
+    assert.match(document.querySelector('.status-message')!.textContent!, /大乱斗 · 01:\d{2}$/);
     assert.equal(document.querySelectorAll('[data-aram-lite-group]').length, 2);
     document.body.innerHTML = markup; await sleep();
     assert.equal(document.querySelectorAll('[data-aram-lite-rendered]').length, 2);
@@ -712,7 +713,10 @@ test('friend grouping and mode/time can be independently toggled and disabled qu
         + friend.gameName + '</span><span class="status-message">游戏中</span></div>').join('') + '</div>';
     await sleep();
     const status = document.querySelector<HTMLElement>('.status-message')!;
-    assert.match(status.textContent!, /大乱斗.*同局1/);
+    assert.match(status.textContent!, /大乱斗/);
+    assert.equal(document.querySelector('.member-name')!.getAttribute('data-aram-lite-group-label'), '同局1');
+    assert.doesNotMatch(status.textContent!, /同局/);
+    assert.equal(status.getAttribute('title'), status.textContent);
     updateConfig({ friendGroups: false }); await sleep();
     assert.match(status.textContent!, /大乱斗/);
     assert.doesNotMatch(status.textContent!, /同局/);
@@ -722,7 +726,8 @@ test('friend grouping and mode/time can be independently toggled and disabled qu
     f.emit(uri.friends, {}); await sleep(300);
     assert.equal(f.requests.filter(request => request.endpoint === uri.friends).length, before);
     updateConfig({ friendGroups: true }); await sleep();
-    assert.equal(status.textContent, '游戏中 · 同局1');
+    assert.equal(status.textContent, '游戏中');
+    assert.equal(document.querySelector('.member-name')!.getAttribute('data-aram-lite-group-label'), '同局1');
     updateConfig({ friendGroups: false, friendStatus: true }); await sleep();
     assert.match(status.textContent!, /大乱斗/);
     assert.doesNotMatch(status.textContent!, /同局/);
@@ -1270,7 +1275,8 @@ test('friend status updates remove stale timers and groups, preserve offline and
       '<span class="member-name">Alice</span><span class="status-message">在线</span></div></div>';
     await sleep();
     const status = document.querySelector('.status-message')!;
-    assert.match(status.textContent!, /海克斯大乱斗.*同局1/);
+    assert.match(status.textContent!, /海克斯大乱斗/);
+    assert.equal(document.querySelector('.member-name')!.getAttribute('data-aram-lite-group-label'), '同局1');
     state = 'championSelect'; f.emit(uri.friends, {});
     await waitUntil(() => status.textContent === '海克斯大乱斗 · 选人中');
     assert.equal(document.querySelector('[data-aram-lite-group]'), null);
@@ -2037,4 +2043,70 @@ test('Bench file logging preserves write order, survives backup failure and rema
     assert.equal(JSON.parse(content).entries.length, 500);
     assert.equal(f.writes().length, 0);
   } finally { f.close(); }
+});
+
+test('postgame reward skipping confirms consecutive native celebrations using a reused custom button', async () => {
+  const f = fixture();
+  let clicks = 0;
+  try {
+    autoDismissRewards(f); f.start(); await sleep();
+    document.body.innerHTML = '<div class="lol-uikit-vignette-celebration-layer"><div class="celebration-content">蓝色精萃奖励</div>'
+      + '<lol-uikit-flat-button class="footer-button">确定</lol-uikit-flat-button></div>';
+    const button = document.querySelector<HTMLElement>('.footer-button')!;
+    button.click = () => { throw new Error('overridden UIKit click must not be used'); };
+    button.addEventListener('click', event => {
+      assert.equal((event as MouseEvent).button, 0);
+      clicks++;
+      if (clicks === 1) document.querySelector('.celebration-content')!.textContent = '升级奖励';
+      else document.querySelector('.lol-uikit-vignette-celebration-layer')!.remove();
+    });
+    await sleep(450); assert.equal(clicks, 0);
+    f.phase('PreEndOfGame');
+    await waitUntil(() => clicks === 1);
+    await waitUntil(() => clicks === 2);
+    await sleep(600); assert.equal(clicks, 2);
+    assert.equal(f.observers, 1);
+    assert.equal(f.writes().length, 0);
+  } finally { f.close(); }
+});
+
+test('reward skipping ignores generic, purchase, honor, hidden and disabled dialogs and follows its switch', async () => {
+  const f = fixture();
+  let unwanted = 0, confirmed = 0;
+  try {
+    autoDismissRewards(f); f.start(); await sleep(); f.phase('EndOfGame');
+    document.body.innerHTML = '<div role="dialog"><button>确定</button></div>'
+      + '<div class="honor-voting"><button>确认</button></div>'
+      + '<div class="lol-uikit-vignette-celebration-layer"><button class="footer-button">购买</button></div>'
+      + '<div class="lol-uikit-vignette-celebration-layer" hidden><button class="footer-button">确定</button></div>'
+      + '<div class="dialog-celebration-container"><button class="dialog-celebration-ok-button" disabled>确认</button></div>';
+    document.querySelectorAll('button').forEach(button => button.addEventListener('click', () => unwanted++));
+    await sleep(650); assert.equal(unwanted, 0);
+    updateConfig({ autoOpenStats: false });
+    document.body.insertAdjacentHTML('beforeend', '<div class="dialog-celebration-container"><div class="dialog-celebration-ok-button">确定</div></div>');
+    document.querySelectorAll('.dialog-celebration-ok-button')[1].addEventListener('click', () => confirmed++);
+    await sleep(600); assert.equal(confirmed, 0);
+    updateConfig({ autoOpenStats: true }); await waitUntil(() => confirmed === 1);
+    assert.equal(unwanted, 0);
+    assert.equal(f.observers, 1);
+  } finally { f.close(); }
+});
+
+test('reward skipping handles late lobby rewards for thirty seconds and stops in other phases', async () => {
+  const f = fixture();
+  const realNow = Date.now;
+  let clicks = 0;
+  const addReward = () => {
+    document.body.innerHTML = '<div class="dialog-celebration-container"><div class="dialog-celebration-ok-button">确定</div></div>';
+    document.querySelector('.dialog-celebration-ok-button')!.addEventListener('click', () => clicks++);
+  };
+  try {
+    autoDismissRewards(f); f.start(); await sleep(); f.phase('EndOfGame'); f.phase('Lobby');
+    addReward(); await waitUntil(() => clicks === 1);
+    Date.now = () => realNow() + 31000;
+    addReward(); await sleep(650); assert.equal(clicks, 1);
+    Date.now = realNow;
+    f.phase('ChampSelect'); addReward(); await sleep(650); assert.equal(clicks, 1);
+    assert.equal(f.writes().length, 0);
+  } finally { Date.now = realNow; f.close(); }
 });

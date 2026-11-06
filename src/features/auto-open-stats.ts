@@ -2,11 +2,14 @@ import { config } from '../core/config';
 import type { FeatureContext } from '../core/context';
 import { Scope } from '../core/events';
 import { report } from '../core/lcu';
+import { autoDismissRewards } from './auto-dismiss-rewards';
 
 export function autoOpenStats(
-  { flow, injector, scope }: FeatureContext,
+  context: FeatureContext,
   waitForHonor: () => Promise<void>,
 ): void {
+  const { flow, injector, scope } = context;
+  autoDismissRewards(context);
   let nativeApi: { displayMatchDetails(options: {
     sections: string[]; defaultSection: string; dataSource: string; hideHeader: boolean;
     gameMode?: string; closeModalCallback: () => void;

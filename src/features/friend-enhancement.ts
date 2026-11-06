@@ -7,6 +7,8 @@ const original = 'data-aram-lite-original';
 const rendered = 'data-aram-lite-rendered';
 const groupAttr = 'data-aram-lite-group';
 const stateAttr = 'data-aram-lite-state';
+const groupLabel = 'data-aram-lite-group-label';
+const savedTitle = 'data-aram-lite-original-title';
 
 export function friendIndex(friends: Friend[]): Map<string, Friend[]> {
   const index = new Map<string, Friend[]>();
@@ -129,6 +131,12 @@ function restore(element: HTMLElement): void {
   element.removeAttribute(stateAttr);
   element.removeAttribute(original);
   element.removeAttribute(rendered);
+  if (element.hasAttribute(savedTitle)) {
+    const title = element.getAttribute(savedTitle)!;
+    if (title) element.setAttribute('title', title);
+    else element.removeAttribute('title');
+    element.removeAttribute(savedTitle);
+  }
 }
 export function friendEnhancement({ events, injector, lcu, scope }: FeatureContext): void {
   const style = document.createElement('style');
@@ -139,7 +147,10 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
     teamSelect: '#63c28c', tutorial: '#e8c85a',
   };
   style.textContent = Object.entries(colors).map(([state, color]) =>
-    '[' + stateAttr + '="' + state + '"]{color:' + color + '!important}').join('');
+    '[' + stateAttr + '="' + state + '"]{color:' + color + '!important}').join('') +
+    '[' + groupLabel + ']{position:relative;box-sizing:border-box;padding-right:42px}' +
+    '[' + groupLabel + ']::after{content:attr(' + groupLabel + ');position:absolute;right:0;top:0;' +
+    'font-size:12px;color:#0acbe6;letter-spacing:0;pointer-events:none}';
   scope.own(() => style.remove());
   let index = new Map<string, Friend[]>();
   let groups = new Map<string, number>();
@@ -272,7 +283,7 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
   loadQueues();
 
   scope.own(injector.register(() => {
-    if (config.friendStatus) {
+    if (enabled()) {
       if (!style.isConnected) document.head?.append(style);
     } else style.remove();
     const members = document.querySelectorAll<HTMLElement>(
@@ -282,7 +293,8 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
     for (const member of members) {
       const status = member.querySelector<HTMLElement>('span.status-message');
       if (!status) continue;
-      const name = member.querySelector('.member-name')?.textContent?.trim();
+      const nameElement = member.querySelector<HTMLElement>('.member-name');
+      const name = nameElement?.textContent?.trim();
       const key = member.getAttribute('data-puuid') || member.querySelector('.member[data-id]')?.getAttribute('data-id') || name;
       const matches = key ? index.get(key) : undefined;
       // A name without tag is ambiguous when two Riot IDs share that name.
@@ -290,12 +302,17 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
       if (!enabled() || !friend || member.classList.contains('offline') || friend.availability === 'offline') {
         restore(status);
         member.removeAttribute(groupAttr);
+        nameElement?.removeAttribute(groupLabel);
         continue;
       }
       const lol = friend.lol;
       const remembered = partySizes.get(friendKey(friend) ?? '');
       const detail = config.friendStatus ? statusText(friend, queueNames, queueTypes, remembered) : null;
       const group = config.friendGroups && lol?.gameStatus === 'inGame' ? groups.get(lol.gameId || '') : undefined;
+      const label = group ? '同局' + group : null;
+      if (label && nameElement) {
+        if (nameElement.getAttribute(groupLabel) !== label) nameElement.setAttribute(groupLabel, label);
+      } else nameElement?.removeAttribute(groupLabel);
       if (!detail && !group) {
         restore(status);
         member.removeAttribute(groupAttr);
@@ -310,9 +327,11 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
         status.setAttribute(original, status.textContent ?? '');
       }
       const base = detail ?? status.getAttribute(original) ?? '';
-      const text = base + (group ? ' · 同局' + group : '');
+      const text = base;
       if (status.getAttribute(rendered) !== text) status.setAttribute(rendered, text);
       if (status.textContent !== text) status.textContent = text;
+      if (!status.hasAttribute(savedTitle)) status.setAttribute(savedTitle, status.getAttribute('title') ?? '');
+      if (status.getAttribute('title') !== text) status.setAttribute('title', text);
       if (group) {
         if (member.getAttribute(groupAttr) !== lol!.gameId) member.setAttribute(groupAttr, lol!.gameId!);
       } else member.removeAttribute(groupAttr);
@@ -321,5 +340,6 @@ export function friendEnhancement({ events, injector, lcu, scope }: FeatureConte
   scope.own(() => {
     document.querySelectorAll<HTMLElement>('[' + rendered + ']').forEach(restore);
     document.querySelectorAll('[' + groupAttr + ']').forEach(member => member.removeAttribute(groupAttr));
+    document.querySelectorAll('[' + groupLabel + ']').forEach(name => name.removeAttribute(groupLabel));
   });
 }
